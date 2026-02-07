@@ -71,14 +71,15 @@ training_args = GRPOConfig(
 
     # GRPO sampling
     num_generations=4,              # samples per prompt (G in the paper)
-    max_completion_length=512,
-    max_prompt_length=512,
+    max_completion_length=256,      # GSM8K answers rarely exceed 200 tokens
+    max_prompt_length=256,
     temperature=0.7,
 
     # Training
     num_train_epochs=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=16,
+    per_device_train_batch_size=2,  # 2 prompts per micro-batch
+    gradient_accumulation_steps=4,  # effective batch = 2*4 = 8 prompts
+    max_steps=200,                  # cap at 200 steps (~1hr) for first run
     learning_rate=5e-5,
     lr_scheduler_type="cosine",
     warmup_ratio=0.1,

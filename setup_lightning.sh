@@ -35,27 +35,37 @@ echo ""
 echo ">>> [3/6] Upgrading numpy/scipy/scikit-learn/pandas for compat ..."
 pip install --upgrade numpy scipy scikit-learn pandas
 
-# ── 4. Install flash-attn from pre-built wheel ────────────────────────────
+# ── 4. Install flash-attn (build from source) ─────────────────────────────
 #    openrlhf imports flash_attn at module level (can't skip it).
-#    pip install from URL fails on Lightning due to cross-device link error
-#    (Errno 18: /tmp and /home are on different mounts).
-#    Fix: wget the wheel to $HOME (same FS as pip), install from local file.
+#    Pre-built wheels have ABI mismatch with Lightning's torch 2.8.0+cu128.
+#    Must compile from source against the exact torch installation.
+#
+#    Requires: nvcc (CUDA compiler) + CUDA dev headers.
+#    Lightning AI has the runtime but not dev tools, so install via conda.
 echo ""
-echo ">>> [4/6] Installing flash-attn (pre-built wheel) ..."
+echo ">>> [4/6] Installing flash-attn (compiling from source, ~5-10 min) ..."
 
-TORCH_VER=$(python3 -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))")
-PY_VER=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
-WHEEL_NAME="flash_attn-2.8.3+cu12torch${TORCH_VER}cxx11abiTRUE-${PY_VER}-${PY_VER}-linux_x86_64.whl"
-WHEEL_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/${WHEEL_NAME}"
+# Install CUDA dev toolkit for compilation
+echo "    Installing CUDA toolkit (nvcc) ..."
+conda install -y -c nvidia cuda-nvcc cuda-libraries-dev cuda-cudart-dev 2>&1
 
-echo "    torch=$TORCH_VER  python=$PY_VER"
-echo "    Downloading: $WHEEL_NAME"
+# Set build environment
+export CUDA_HOME="$CONDA_PREFIX"
+export PATH="$CUDA_HOME/bin:$PATH"
+export TMPDIR="$HOME/tmp"
+mkdir -p "$TMPDIR"
 
-cd "$HOME"
-wget -q "$WHEEL_URL" -O "$WHEEL_NAME"
-pip install "./$WHEEL_NAME"
-rm -f "$WHEEL_NAME"
-cd -
+echo "    CUDA_HOME=$CUDA_HOME"
+echo "    nvcc: $(nvcc --version 2>/dev/null | tail -1 || echo 'NOT FOUND')"
+echo "    Compiling flash-attn against torch $(python3 -c 'import torch; print(torch.__version__)') ..."
+
+# FLASH_ATTENTION_FORCE_BUILD=TRUE skips pre-built wheel download
+# --no-build-isolation lets it find the system torch
+# --no-cache-dir avoids stale cache issues
+FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=4 \
+    pip install flash-attn==2.8.3 --no-build-isolation --no-cache-dir
+
+unset TMPDIR
 
 # ── 5. Install OpenRLHF + all dependencies ────────────────────────────────
 echo ""

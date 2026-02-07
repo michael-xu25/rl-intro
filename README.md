@@ -48,8 +48,7 @@ WANDB_TOKEN=your_token_here bash src/train_math.sh
 ```
 rl-intro/
 ├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-├── setup_lightning.sh        # One-time Lightning AI setup
+├── setup_lightning.sh        # One-time Lightning AI setup (all deps)
 ├── .gitignore
 └── src/
     ├── train_math.sh         # Main training launch script

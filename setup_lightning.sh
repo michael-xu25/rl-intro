@@ -36,12 +36,13 @@ pip install --upgrade pip setuptools wheel
 echo ""
 echo ">>> [3/4] Installing Python requirements ..."
 pip install wandb datasets lightning-sdk
-pip install openrlhf --no-build-isolation 2>&1 || {
-    echo "    openrlhf direct install failed — trying without flash-attn dep ..."
-    pip install openrlhf --no-deps
-    pip install accelerate bitsandbytes deepspeed einops peft transformers \
-                tokenizers sentencepiece datasets "ray[default]" 2>&1 || true
-}
+
+# openrlhf has flash-attn==2.8.3 as a hard dep, which fails to build on
+# Lightning AI. We skip it with --no-deps and install the real deps manually.
+echo "    Installing openrlhf (skipping flash-attn) ..."
+pip install openrlhf --no-deps
+pip install accelerate bitsandbytes deepspeed einops peft transformers \
+            tokenizers sentencepiece "ray[default]"
 
 # ── 4. Pre-download model & dataset ───────────────────────────────────────
 echo ""

@@ -68,8 +68,11 @@ for i, idx in enumerate(indices):
     gold_label = dataset[idx]["answer"]
     gold = extract_gold_answer(gold_label)
 
-    # Format as chat
-    messages = [{"role": "user", "content": question}]
+    # Format as chat (same system prompt used in training)
+    messages = [
+        {"role": "system", "content": "Solve the math problem. Keep your reasoning short. End your response with 'The answer is <number>'."},
+        {"role": "user", "content": question},
+    ]
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
 

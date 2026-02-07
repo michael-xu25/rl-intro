@@ -44,9 +44,15 @@ logger.info(f"Log file: {LOG_FILE}")
 # GSM8K has 'question' and 'answer' columns.
 # TRL expects a 'prompt' column with chat messages.
 
+SYSTEM_PROMPT = (
+    "Solve the math problem. Keep your reasoning short. "
+    "End your response with 'The answer is <number>'."
+)
+
 def build_prompt(example):
     """Convert GSM8K question to chat format for Qwen Instruct."""
     example["prompt"] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": example["question"]},
     ]
     return example
@@ -75,7 +81,7 @@ training_args = GRPOConfig(
 
     # GRPO sampling
     num_generations=8,              # 8 samples per prompt → stronger advantage signal
-    max_completion_length=256,      # GSM8K answers rarely exceed 200 tokens
+    max_completion_length=512,      # model needs room to reason + state answer
     max_prompt_length=256,
     temperature=0.9,                # higher temp → more diverse samples → better signal
 

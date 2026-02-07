@@ -8,10 +8,32 @@ Usage:
 """
 
 import os
+import logging
+from datetime import datetime, timezone
 from datasets import load_dataset
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
 from reward_func import correctness_reward, format_reward
+
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+LOG_DIR = "./logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, f"run_{RUN_TIMESTAMP}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
+logger.info(f"Log file: {LOG_FILE}")
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
@@ -26,8 +48,10 @@ def build_prompt(example):
     return example
 
 
+logger.info("Loading GSM8K dataset ...")
 dataset = load_dataset("openai/gsm8k", "main", split="train")
 dataset = dataset.map(build_prompt)
+logger.info(f"Dataset loaded: {len(dataset)} examples")
 
 
 # ── LoRA config ─────────────────────────────────────────────────────────────
@@ -42,7 +66,8 @@ peft_config = LoraConfig(
 
 # ── Training config ─────────────────────────────────────────────────────────
 training_args = GRPOConfig(
-    output_dir="./checkpoint/qwen-0.5b-gsm8k-grpo",
+    output_dir=f"./checkpoint/run_{RUN_TIMESTAMP}",
+    run_name=f"grpo_{RUN_TIMESTAMP}",
 
     # GRPO sampling
     num_generations=4,              # samples per prompt (G in the paper)
@@ -70,6 +95,19 @@ training_args = GRPOConfig(
 )
 
 
+# ── Log config ──────────────────────────────────────────────────────────────
+logger.info("Config:")
+logger.info(f"  Model:            Qwen/Qwen2.5-0.5B-Instruct")
+logger.info(f"  LoRA rank:        {peft_config.r}")
+logger.info(f"  Num generations:  {training_args.num_generations}")
+logger.info(f"  Batch size:       {training_args.per_device_train_batch_size}")
+logger.info(f"  Grad accum steps: {training_args.gradient_accumulation_steps}")
+logger.info(f"  Learning rate:    {training_args.learning_rate}")
+logger.info(f"  Temperature:      {training_args.temperature}")
+logger.info(f"  Output dir:       {training_args.output_dir}")
+logger.info(f"  W&B:              {training_args.report_to}")
+
+
 # ── Trainer ─────────────────────────────────────────────────────────────────
 trainer = GRPOTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
@@ -89,7 +127,9 @@ if os.environ.get("WANDB_TOKEN"):
         os.environ["WANDB_ENTITY"] = os.environ["WANDB_ENTITY"]
         wandb.init(project="tiny-math-solver", entity=os.environ["WANDB_ENTITY"])
 
+logger.info("Starting training ...")
 trainer.train()
 trainer.save_model()
 
-print(f"\nTraining complete! Model saved to: {training_args.output_dir}")
+logger.info(f"Training complete! Model saved to: {training_args.output_dir}")
+logger.info(f"=== Run finished: {datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')} ===")

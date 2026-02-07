@@ -29,11 +29,12 @@ echo ">>> [2/5] Upgrading pip ..."
 pip install --upgrade pip setuptools wheel
 
 # ── 3. Fix pre-installed packages that break with numpy 2.x ───────────────
-#    Lightning AI ships old scipy/scikit-learn compiled against numpy 1.x.
-#    These crash at import time with numpy 2.x ("multiarray failed to import").
+#    Lightning AI ships old scipy/scikit-learn/pandas compiled against numpy 1.x.
+#    These crash at import time with numpy 2.x ("dtype size changed" / "multiarray
+#    failed to import"). Upgrade them all in one shot.
 echo ""
-echo ">>> [3/5] Upgrading scipy/scikit-learn for numpy 2.x compat ..."
-pip install --upgrade scipy scikit-learn
+echo ">>> [3/5] Upgrading numpy/scipy/scikit-learn/pandas for compat ..."
+pip install --upgrade numpy scipy scikit-learn pandas
 
 # ── 4. Install OpenRLHF + all dependencies ────────────────────────────────
 #    openrlhf has flash-attn==2.8.3 as a hard dep, which fails to build on

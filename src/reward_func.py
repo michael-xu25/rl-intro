@@ -48,10 +48,13 @@ def extract_predicted_answer(text: str) -> str | None:
     """
     Extract the predicted number from model output.
 
+    Only matches explicit answer patterns -- no "last number" fallback,
+    because that picks up random intermediate numbers and creates noise.
+
     Priority:
       1. '#### <number>' (GSM8K format)
       2. 'The answer is <number>'
-      3. Last number in the text
+      3. '\\boxed{<number>}' (common math format)
     """
     # Strategy 1: #### pattern
     match = re.search(r"####\s*([\d,]+(?:\.\d+)?)", text)
@@ -60,20 +63,25 @@ def extract_predicted_answer(text: str) -> str | None:
 
     # Strategy 2: "the answer is <number>"
     match = re.search(
-        r"[Tt]he\s+(?:final\s+)?answer\s+is\s*:?\s*([\d,]+(?:\.\d+)?)", text
+        r"[Tt]he\s+(?:final\s+)?answer\s+is\s*:?\s*\$?\s*([\d,]+(?:\.\d+)?)", text
     )
     if match:
         return match.group(1).replace(",", "")
 
-    # Strategy 3: last number in text
-    numbers = re.findall(r"[\d,]+(?:\.\d+)?", text)
-    if numbers:
-        return numbers[-1].replace(",", "")
+    # Strategy 3: \boxed{<number>}
+    match = re.search(r"\\boxed\{([\d,]+(?:\.\d+)?)\}", text)
+    if match:
+        return match.group(1).replace(",", "")
+
+    # Strategy 4: bold or highlighted answer at end: **<number>**
+    match = re.search(r"\*\*([\d,]+(?:\.\d+)?)\*\*\s*$", text.strip())
+    if match:
+        return match.group(1).replace(",", "")
 
     return None
 
 
-def correctness_reward(completions: list[str], answer: list[str], **kwargs) -> list[float]:
+def correctness_reward(completions, answer, **kwargs) -> list[float]:
     """
     Binary reward: 1.0 if the model's answer matches the gold answer, else 0.0.
 
@@ -94,41 +102,50 @@ def correctness_reward(completions: list[str], answer: list[str], **kwargs) -> l
         rewards.append(1.0 if correct else 0.0)
         samples.append((text, gold, pred, correct))
 
-    # Log sample outputs every N steps
-    if _step_counter % LOG_EVERY == 0:
+    # Log samples: every step for first 5, then every LOG_EVERY steps
+    should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
+    if should_log:
         n_correct = sum(r for r in rewards)
-        logger.info(f"\n{'='*60}")
-        logger.info(f"  SAMPLE OUTPUTS (step {_step_counter}) — {int(n_correct)}/{len(rewards)} correct")
-        logger.info(f"{'='*60}")
-        # Show up to 3 samples (1 correct + 1 wrong if possible)
-        shown = 0
-        for i, (text, gold, pred, correct) in enumerate(samples):
-            if shown >= 3:
-                break
-            snippet = text[:300].replace('\n', ' ↵ ')
-            if len(text) > 300:
+        n_parsed = sum(1 for _, _, pred, _ in samples if pred is not None)
+        print(flush=True)
+        print(f"{'='*70}", flush=True)
+        print(f"  REWARD DEBUG (step {_step_counter}) — "
+              f"{int(n_correct)}/{len(rewards)} correct, "
+              f"{n_parsed}/{len(rewards)} had parseable answer", flush=True)
+        print(f"{'='*70}", flush=True)
+        # Show up to 4 samples
+        for i, (text, gold, pred, correct) in enumerate(samples[:4]):
+            snippet = text[:400].replace('\n', ' ↵ ')
+            if len(text) > 400:
                 snippet += "..."
-            status = "CORRECT" if correct else "WRONG"
-            logger.info(f"  [{status}] gold={gold} pred={pred}")
-            logger.info(f"  Output: {snippet}")
-            logger.info(f"  ---")
-            shown += 1
-        logger.info(f"{'='*60}\n")
+            status = "CORRECT" if correct else "WRONG  "
+            print(f"  [{status}] gold={gold}  pred={pred}", flush=True)
+            print(f"  Output: {snippet}", flush=True)
+            print(f"  ---", flush=True)
+        print(f"{'='*70}", flush=True)
+        print(flush=True)
 
     return rewards
 
 
-def format_reward(completions: list[str], **kwargs) -> list[float]:
+def format_reward(completions, **kwargs) -> list[float]:
     """
-    Format reward: 0.5 if the model uses the '#### <number>' format, else 0.0.
+    Format reward: encourages the model to clearly state its answer.
 
-    Encourages the model to produce answers in a parseable format.
+    +0.5 for '#### <number>' format
+    +0.3 for 'The answer is <number>'
+    +0.1 for any clear answer pattern (boxed, bold)
+    0.0 for no clear answer
     """
     rewards = []
     for completion in completions:
         text = _get_text(completion)
         if re.search(r"####\s*[\d,]+", text):
             rewards.append(0.5)
+        elif re.search(r"[Tt]he\s+(?:final\s+)?answer\s+is\s*:?\s*\$?\s*[\d,]+", text):
+            rewards.append(0.3)
+        elif re.search(r"\\boxed\{[\d,]+", text) or re.search(r"\*\*[\d,]+\*\*\s*$", text.strip()):
+            rewards.append(0.1)
         else:
             rewards.append(0.0)
     return rewards

@@ -41,8 +41,15 @@ pip install wandb datasets lightning-sdk
 # Lightning AI. We skip it with --no-deps and install the real deps manually.
 echo "    Installing openrlhf (skipping flash-attn) ..."
 pip install openrlhf --no-deps
-pip install accelerate bitsandbytes deepspeed einops peft transformers \
-            tokenizers sentencepiece "ray[default]" vllm
+
+# All openrlhf deps EXCEPT flash-attn (which fails to build on Lightning AI).
+# Pin ray==2.48.0 to match openrlhf's requirement.
+pip install \
+    accelerate bitsandbytes deepspeed einops peft transformers \
+    tokenizers sentencepiece vllm \
+    "ray[default]==2.48.0" \
+    isort jsonlines loralib optimum "optree>=0.15.0" \
+    pylatexenc "pynvml>=12.0.0" torchdata transformers_stream_generator
 
 # ── 4. Pre-download model & dataset ───────────────────────────────────────
 echo ""

@@ -14,6 +14,13 @@ Additional dataset columns (like 'answer') are passed as kwargs.
 """
 
 import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Track how many times correctness_reward is called (= training steps)
+_step_counter = 0
+LOG_EVERY = 10  # log sample outputs every N steps
 
 
 def _get_text(completion) -> str:
@@ -74,15 +81,40 @@ def correctness_reward(completions: list[str], answer: list[str], **kwargs) -> l
         completions: Model-generated responses.
         answer: Gold answers from GSM8K (format: "reasoning...\n#### 42").
     """
+    global _step_counter
+    _step_counter += 1
+
     rewards = []
+    samples = []  # collect for logging
     for completion, gold_label in zip(completions, answer):
         text = _get_text(completion)
         gold = extract_gold_answer(gold_label)
         pred = extract_predicted_answer(text)
-        if gold is not None and pred is not None and pred == gold:
-            rewards.append(1.0)
-        else:
-            rewards.append(0.0)
+        correct = gold is not None and pred is not None and pred == gold
+        rewards.append(1.0 if correct else 0.0)
+        samples.append((text, gold, pred, correct))
+
+    # Log sample outputs every N steps
+    if _step_counter % LOG_EVERY == 0:
+        n_correct = sum(r for r in rewards)
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  SAMPLE OUTPUTS (step {_step_counter}) — {int(n_correct)}/{len(rewards)} correct")
+        logger.info(f"{'='*60}")
+        # Show up to 3 samples (1 correct + 1 wrong if possible)
+        shown = 0
+        for i, (text, gold, pred, correct) in enumerate(samples):
+            if shown >= 3:
+                break
+            snippet = text[:300].replace('\n', ' ↵ ')
+            if len(text) > 300:
+                snippet += "..."
+            status = "CORRECT" if correct else "WRONG"
+            logger.info(f"  [{status}] gold={gold} pred={pred}")
+            logger.info(f"  Output: {snippet}")
+            logger.info(f"  ---")
+            shown += 1
+        logger.info(f"{'='*60}\n")
+
     return rewards
 
 

@@ -96,7 +96,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
     --lr_scheduler cosine \
     --gradient_checkpointing \
     --adam_offload \
-    --attn_implementation sdpa \
+    --attn_implementation flash_attention_2 \
     --lora_rank "$LORA_RANK" \
     --lora_dropout "$LORA_DROPOUT" \
     --packing_samples \

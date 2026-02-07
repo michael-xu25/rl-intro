@@ -3,7 +3,7 @@
 # Tiny-Math-Solver — GRPO training on GSM8K with OpenRLHF
 # ============================================================================
 # Usage:   bash src/train_math.sh
-# Assumes: single-GPU Lightning AI Studio (A10G 24 GB or A100 40/80 GB)
+# Assumes: single-GPU Lightning AI Studio (L4 24 GB or A100 40/80 GB)
 # ============================================================================
 set -euo pipefail
 
@@ -18,7 +18,7 @@ WANDB_TOKEN="${WANDB_TOKEN:-}"                      # set env var or leave blank
 LORA_RANK=16
 LORA_DROPOUT=0.05
 
-# Batch sizes  (conservative for A10G 24 GB — increase for A100)
+# Batch sizes  (conservative for L4 24 GB — increase for A100)
 MICRO_TRAIN_BS=2          # per-GPU training micro-batch
 TRAIN_BS=64               # global training batch
 MICRO_ROLLOUT_BS=4        # per-GPU rollout micro-batch
@@ -38,31 +38,21 @@ KL_COEF=0.05
 # ── Start Ray (single-node, single-GPU) ────────────────────────────────────
 echo ">>> Starting Ray head (1 GPU) ..."
 ray stop --force 2>/dev/null || true
-ray start --head --node-ip-address 0.0.0.0 --num-gpus 1
+ray start --head --node-ip-address 127.0.0.1 --num-gpus 1 --disable-usage-stats
 
-# Wait for Ray dashboard agent to be ready (handles job submissions).
-# ray status showing GPUs is NOT enough — the dashboard agent starts later.
-echo ">>> Waiting for Ray dashboard agent ..."
-for i in $(seq 1 60); do
-    # Check if the dashboard job API is responding
-    if curl -s http://127.0.0.1:8265/api/version >/dev/null 2>&1; then
-        # Also verify GPU resources are registered
-        if ray status 2>&1 | grep -q "1.0 GPU"; then
-            echo "    Ray dashboard + GPU agent ready (${i}s)."
-            break
-        fi
+# Wait for Ray to register resources
+echo ">>> Waiting for Ray to be ready ..."
+for i in $(seq 1 30); do
+    if ray status 2>&1 | grep -q "1.0 GPU"; then
+        echo "    Ray is ready with 1 GPU (${i}s)."
+        break
     fi
-    if [ "$i" -eq 60 ]; then
-        echo "    WARNING: Timed out waiting for Ray (120s)."
-        echo "    Current Ray status:"
+    if [ "$i" -eq 30 ]; then
+        echo "    WARNING: Timed out waiting for Ray GPU."
         ray status
-        echo "    Attempting job submit anyway ..."
     fi
     sleep 2
 done
-
-# Extra buffer — the agent endpoint can lag behind the dashboard API
-sleep 5
 
 # ── Build wandb flag ────────────────────────────────────────────────────────
 WANDB_FLAG=""
@@ -70,13 +60,11 @@ if [ -n "$WANDB_TOKEN" ]; then
     WANDB_FLAG="--use_wandb $WANDB_TOKEN"
 fi
 
-# ── Launch training (with retry) ──────────────────────────────────────────
-echo ">>> Submitting GRPO training job ..."
-set +e  # allow retries on failure
-for attempt in 1 2 3; do
-    ray job submit --address="http://127.0.0.1:8265" \
-    --runtime-env-json="{\"working_dir\": \"$(pwd)\"}" \
-    -- python3 -m openrlhf.cli.train_ppo_ray \
+# ── Launch training ─────────────────────────────────────────────────────────
+# Run directly with python (not ray job submit) to avoid dashboard agent issues.
+# Ray is already started above, so the training script connects to it automatically.
+echo ">>> Launching GRPO training ..."
+python3 -m openrlhf.cli.train_ppo_ray \
     --ref_num_nodes 1 \
     --ref_num_gpus_per_node 1 \
     --actor_num_nodes 1 \
@@ -115,20 +103,7 @@ for attempt in 1 2 3; do
     --save_steps 50 \
     --logging_steps 1 \
     --temperature 0.7 \
-    $WANDB_FLAG \
-    && break  # success — exit retry loop
-
-    echo ""
-    if [ "$attempt" -lt 3 ]; then
-        echo "    Job submit failed (attempt $attempt/3). Retrying in 10s ..."
-        sleep 10
-    else
-        echo "    ERROR: Job submission failed after 3 attempts."
-        echo "    Try: ray stop --force && bash src/train_math.sh"
-        exit 1
-    fi
-done
-set -e  # restore strict mode
+    $WANDB_FLAG
 
 echo ""
 echo ">>> Training complete!  LoRA adapter saved to: $SAVE_PATH"

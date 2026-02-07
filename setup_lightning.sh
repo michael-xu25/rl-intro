@@ -45,9 +45,19 @@ pip install --upgrade numpy scipy scikit-learn pandas
 echo ""
 echo ">>> [4/6] Installing flash-attn (compiling from source, ~5-10 min) ..."
 
-# Install CUDA dev toolkit for compilation
-echo "    Installing CUDA toolkit (nvcc) ..."
-conda install -y -c nvidia cuda-nvcc cuda-libraries-dev cuda-cudart-dev 2>&1
+# Detect torch's CUDA version so we install the matching toolkit.
+# torch 2.8.0+cu128 -> CUDA 12.8 -> conda pin ">=12.8,<12.9"
+TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda)")
+CUDA_PIN=">=${TORCH_CUDA},<$(echo "$TORCH_CUDA" | awk -F. '{print $1"."$2+1}')"
+echo "    torch CUDA: $TORCH_CUDA -> conda pin: $CUDA_PIN"
+
+# Install CUDA dev toolkit pinned to match torch exactly
+echo "    Installing CUDA ${TORCH_CUDA} toolkit (nvcc + dev headers) ..."
+conda install -y -c nvidia \
+    "cuda-nvcc${CUDA_PIN}" \
+    "cuda-cudart-dev${CUDA_PIN}" \
+    "cuda-libraries-dev${CUDA_PIN}" \
+    2>&1
 
 # Set build environment
 export CUDA_HOME="$CONDA_PREFIX"
@@ -57,15 +67,19 @@ mkdir -p "$TMPDIR"
 
 echo "    CUDA_HOME=$CUDA_HOME"
 echo "    nvcc: $(nvcc --version 2>/dev/null | tail -1 || echo 'NOT FOUND')"
-echo "    Compiling flash-attn against torch $(python3 -c 'import torch; print(torch.__version__)') ..."
+echo "    torch: $(python3 -c 'import torch; print(torch.__version__)')"
+echo "    Compiling flash-attn from source (~5-10 min) ..."
 
-# FLASH_ATTENTION_FORCE_BUILD=TRUE skips pre-built wheel download
+# FLASH_ATTENTION_FORCE_BUILD=TRUE forces source compilation
+#   (skips pre-built wheel download which has ABI mismatch)
 # --no-build-isolation lets it find the system torch
-# --no-cache-dir avoids stale cache issues
+# --no-cache-dir avoids stale cache
 FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=4 \
     pip install flash-attn==2.8.3 --no-build-isolation --no-cache-dir
 
 unset TMPDIR
+
+echo "    flash-attn installed successfully."
 
 # ── 5. Install OpenRLHF + all dependencies ────────────────────────────────
 echo ""

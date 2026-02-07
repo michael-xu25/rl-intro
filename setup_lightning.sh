@@ -42,7 +42,7 @@ pip install wandb datasets lightning-sdk
 echo "    Installing openrlhf (skipping flash-attn) ..."
 pip install openrlhf --no-deps
 pip install accelerate bitsandbytes deepspeed einops peft transformers \
-            tokenizers sentencepiece "ray[default]"
+            tokenizers sentencepiece "ray[default]" vllm
 
 # ── 4. Pre-download model & dataset ───────────────────────────────────────
 echo ""

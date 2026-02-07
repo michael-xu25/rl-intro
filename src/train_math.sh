@@ -39,7 +39,21 @@ KL_COEF=0.05
 echo ">>> Starting Ray head (1 GPU) ..."
 ray stop --force 2>/dev/null || true
 ray start --head --node-ip-address 0.0.0.0 --num-gpus 1
-sleep 5   # let Ray initialise
+
+# Wait for Ray agent to be ready (poll up to 60 seconds)
+echo ">>> Waiting for Ray agent to register ..."
+for i in $(seq 1 30); do
+    if ray status 2>&1 | grep -q "1.0 GPU"; then
+        echo "    Ray is ready (GPU detected)."
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "    WARNING: Timed out waiting for Ray GPU agent (60s)."
+        echo "    Current Ray status:"
+        ray status
+    fi
+    sleep 2
+done
 
 # ── Build wandb flag ────────────────────────────────────────────────────────
 WANDB_FLAG=""
@@ -83,11 +97,10 @@ ray job submit --address="http://127.0.0.1:8265" \
     --lr_scheduler cosine \
     --gradient_checkpointing \
     --adam_offload \
-    --attn_implementation flash_attention_2 \
+    --attn_implementation sdpa \
     --lora_rank "$LORA_RANK" \
     --lora_dropout "$LORA_DROPOUT" \
     --packing_samples \
-    --flash_attn \
     --save_steps 50 \
     --logging_steps 1 \
     --temperature 0.7 \

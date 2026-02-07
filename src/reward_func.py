@@ -4,12 +4,29 @@ Rule-Based Reward Functions for GSM8K Math Problems.
 Used by TRL's GRPOTrainer via the reward_funcs parameter.
 
 TRL reward function signature:
-    reward_func(completions: list[str], **kwargs) -> list[float]
+    reward_func(completions, **kwargs) -> list[float]
+
+When using chat templates, `completions` is a list of conversation lists,
+e.g. [[{"role": "assistant", "content": "..."}]]. We extract the text
+from the last assistant message.
 
 Additional dataset columns (like 'answer') are passed as kwargs.
 """
 
 import re
+
+
+def _get_text(completion) -> str:
+    """Extract plain text from a completion (handles both str and chat format)."""
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, list):
+        # Chat format: list of message dicts, grab last assistant content
+        for msg in reversed(completion):
+            if isinstance(msg, dict) and msg.get("content"):
+                return msg["content"]
+        return ""
+    return str(completion)
 
 
 def extract_gold_answer(label: str) -> str | None:
@@ -59,8 +76,9 @@ def correctness_reward(completions: list[str], answer: list[str], **kwargs) -> l
     """
     rewards = []
     for completion, gold_label in zip(completions, answer):
+        text = _get_text(completion)
         gold = extract_gold_answer(gold_label)
-        pred = extract_predicted_answer(completion)
+        pred = extract_predicted_answer(text)
         if gold is not None and pred is not None and pred == gold:
             rewards.append(1.0)
         else:
@@ -76,7 +94,8 @@ def format_reward(completions: list[str], **kwargs) -> list[float]:
     """
     rewards = []
     for completion in completions:
-        if re.search(r"####\s*[\d,]+", completion):
+        text = _get_text(completion)
+        if re.search(r"####\s*[\d,]+", text):
             rewards.append(0.5)
         else:
             rewards.append(0.0)

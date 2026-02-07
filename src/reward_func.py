@@ -16,7 +16,7 @@ Additional dataset columns (like 'answer') are passed as kwargs.
 import re
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("tiny_math_solver")
 
 # Track how many times correctness_reward is called (= training steps)
 _step_counter = 0

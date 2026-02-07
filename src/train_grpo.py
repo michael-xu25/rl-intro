@@ -10,27 +10,31 @@ Usage:
 import os
 import logging
 from datetime import datetime, timezone
-from datasets import load_dataset
-from peft import LoraConfig
-from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward, format_reward
 
-
-# ── Logging ─────────────────────────────────────────────────────────────────
+# ── Logging (set up BEFORE importing libraries that configure logging) ─────
 RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 LOG_DIR = "./logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, f"run_{RUN_TIMESTAMP}.log")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+# Explicitly add handlers to root logger (basicConfig is a no-op if
+# any library has already configured logging, which transformers/trl do)
+_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_file_handler = logging.FileHandler(LOG_FILE)
+_file_handler.setFormatter(_formatter)
+_file_handler.setLevel(logging.INFO)
+
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+_root_logger.addHandler(_file_handler)
+
+logger = logging.getLogger("tiny_math_solver")
+logger.setLevel(logging.INFO)
+
+from datasets import load_dataset
+from peft import LoraConfig
+from trl import GRPOTrainer, GRPOConfig
+from reward_func import correctness_reward, format_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")

@@ -1,128 +1,101 @@
 # Tiny-Math-Solver
 
-Train **Qwen/Qwen2.5-0.5B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** (Group Relative Policy Optimization) with a **rule-based reward function** — powered by [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF).
+Train **Qwen/Qwen2.5-0.5B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** with a **rule-based reward function** -- powered by [TRL](https://github.com/huggingface/trl).
 
-No trained reward model needed. The reward function simply checks whether the model's numerical answer matches the ground truth.
+No trained reward model needed. The reward function checks whether the model's numerical answer matches the ground truth.
 
-## Quick Start (4 steps)
+## Quick Start
 
-### 1. Push to GitHub (local machine)
-
-```bash
-cd rl-intro
-git add -A && git commit -m "initial scaffold" && git push -u origin main
-```
-
-### 2. Clone on Lightning AI Studio
+### 1. Clone on Lightning AI Studio
 
 Open a **Lightning AI Studio** with a GPU (L4 recommended), then:
 
 ```bash
-cd ~
 git clone https://github.com/michael-xu25/rl-intro.git
 cd rl-intro
 ```
 
-### 3. Run setup (once)
+### 2. Run setup (once)
 
 ```bash
 bash setup_lightning.sh
 ```
 
-This installs OpenRLHF and pre-downloads the model + dataset.
-
-### 4. Run training
+### 3. Run training
 
 ```bash
 bash src/train_math.sh
 ```
 
-Optionally enable Weights & Biases logging:
+With Weights & Biases logging:
 
 ```bash
-WANDB_TOKEN=your_token_here bash src/train_math.sh
+WANDB_TOKEN=your_token bash src/train_math.sh
 ```
 
 ## Project Structure
 
 ```
 rl-intro/
-├── README.md                 # This file
-├── setup_lightning.sh        # One-time Lightning AI setup (all deps)
+├── README.md
+├── setup_lightning.sh          # One-time setup (pip install trl peft ...)
 ├── .gitignore
 └── src/
-    ├── train_math.sh         # Main training launch script
-    └── reward_func.py        # Rule-based reward (answer checker)
+    ├── train_math.sh           # Shell wrapper
+    ├── train_grpo.py           # Training script (TRL GRPOTrainer)
+    └── reward_func.py          # Rule-based rewards (answer checker)
 ```
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Training Loop (GRPO)                  │
-│                                                         │
-│  GSM8K prompt ──► Actor (Qwen 0.5B + LoRA)             │
-│                      │                                  │
-│                      ▼  (4 samples per prompt)          │
-│                  Generated solutions                    │
-│                      │                                  │
-│                      ▼                                  │
-│               reward_func.py                            │
-│              ┌───────────────┐                          │
-│              │ Extract pred  │ ◄── model response       │
-│              │ Extract gold  │ ◄── GSM8K label          │
-│              │ Compare nums  │                          │
-│              └──────┬────────┘                          │
-│                     │                                   │
-│              reward: 1.0 (correct) + 0.5 (format)      │
-│              reward: 0.0 (wrong)                        │
-│                     │                                   │
-│                     ▼                                   │
-│            GRPO advantage estimation                    │
-│            (group normalisation across 4 samples)       │
-│                     │                                   │
-│                     ▼                                   │
-│             Update LoRA adapter                         │
-└─────────────────────────────────────────────────────────┘
+GSM8K question
+    │
+    ▼
+Actor (Qwen 0.5B + LoRA)
+    │  generates 4 solutions per question
+    ▼
+reward_func.py
+    ├── correctness_reward: 1.0 if answer matches gold, else 0.0
+    └── format_reward:      0.5 if uses #### format, else 0.0
+    │
+    ▼
+GRPO advantage = normalize rewards across the 4 samples
+    │
+    ▼
+Update LoRA adapter
 ```
 
 ## Configuration
 
-Key knobs in `src/train_math.sh`:
+Edit `src/train_grpo.py` to tune:
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `LORA_RANK` | 16 | Higher = more capacity, more memory |
-| `N_SAMPLES` | 4 | Samples per prompt for GRPO (try 8 for better signal) |
-| `MICRO_TRAIN_BS` | 2 | Increase to 4-8 on A100 80GB |
-| `MAX_SAMPLES` | 50000 | Total training prompts |
-| `LR` | 5e-5 | Actor learning rate |
-| `KL_COEF` | 0.05 | KL penalty (lower = more exploration) |
+| `r` (LoRA rank) | 16 | Higher = more capacity, more memory |
+| `num_generations` | 4 | Samples per prompt (try 8 for better signal) |
+| `per_device_train_batch_size` | 1 | Increase on A100 |
+| `gradient_accumulation_steps` | 16 | Effective batch = this x per_device |
+| `learning_rate` | 5e-5 | Actor learning rate |
+| `temperature` | 0.7 | Generation temperature |
 
 ## After Training
 
-The training script saves a **LoRA adapter** (not full weights). To merge it with the base model:
+The LoRA adapter is saved to `./checkpoint/qwen-0.5b-gsm8k-grpo`. To merge with base model:
 
-```bash
-python -m openrlhf.cli.lora_combiner \
-    --model_path Qwen/Qwen2.5-0.5B-Instruct \
-    --lora_path ./checkpoint/qwen-0.5b-gsm8k-grpo \
-    --output_path ./checkpoint/qwen-0.5b-gsm8k-merged \
-    --bf16
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM
+
+base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+model = PeftModel.from_pretrained(base, "./checkpoint/qwen-0.5b-gsm8k-grpo")
+merged = model.merge_and_unload()
+merged.save_pretrained("./checkpoint/qwen-0.5b-gsm8k-merged")
 ```
-
-## Switching Algorithms
-
-Change `--advantage_estimator` in `src/train_math.sh`:
-
-- `group_norm` — **GRPO** (default, no critic needed)
-- `reinforce_baseline` — **REINFORCE++-baseline** (recommended for RLVR)
-- `reinforce` — **REINFORCE++**
-- `gae` — **PPO** (needs critic, uses more memory)
 
 ## References
 
-- [OpenRLHF Documentation](https://openrlhf.readthedocs.io/)
-- [OpenRLHF GitHub](https://github.com/OpenRLHF/OpenRLHF)
+- [TRL GRPO Trainer Docs](https://huggingface.co/docs/trl/main/grpo_trainer)
 - [GSM8K Dataset](https://huggingface.co/datasets/openai/gsm8k)
 - [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+- [GRPO Paper (DeepSeekMath)](https://huggingface.co/papers/2402.03300)

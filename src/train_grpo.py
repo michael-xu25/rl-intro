@@ -84,6 +84,10 @@ trainer = GRPOTrainer(
 if os.environ.get("WANDB_TOKEN"):
     import wandb
     wandb.login(key=os.environ["WANDB_TOKEN"])
+    # If your W&B account requires a team entity, set WANDB_ENTITY env var
+    if os.environ.get("WANDB_ENTITY"):
+        os.environ["WANDB_ENTITY"] = os.environ["WANDB_ENTITY"]
+        wandb.init(project="tiny-math-solver", entity=os.environ["WANDB_ENTITY"])
 
 trainer.train()
 trainer.save_model()

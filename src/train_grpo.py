@@ -74,19 +74,19 @@ training_args = GRPOConfig(
     run_name=f"grpo_{RUN_TIMESTAMP}",
 
     # GRPO sampling
-    num_generations=4,              # samples per prompt (G in the paper)
+    num_generations=8,              # 8 samples per prompt → stronger advantage signal
     max_completion_length=256,      # GSM8K answers rarely exceed 200 tokens
     max_prompt_length=256,
-    temperature=0.7,
+    temperature=0.9,                # higher temp → more diverse samples → better signal
 
     # Training
     num_train_epochs=1,
-    per_device_train_batch_size=2,  # 2 prompts per micro-batch
-    gradient_accumulation_steps=4,  # effective batch = 2*4 = 8 prompts
-    max_steps=200,                  # cap at 200 steps (~1hr) for first run
-    learning_rate=5e-5,
+    per_device_train_batch_size=4,  # 4 prompts per micro-batch
+    gradient_accumulation_steps=4,  # effective batch = 4*4 = 16 prompts
+    max_steps=200,                  # cap at 200 steps for this run
+    learning_rate=2e-4,             # LoRA can handle higher LR
     lr_scheduler_type="cosine",
-    warmup_ratio=0.1,
+    warmup_ratio=0.03,              # shorter warmup, start learning sooner
     bf16=True,
     gradient_checkpointing=True,
 

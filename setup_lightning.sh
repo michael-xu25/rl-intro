@@ -22,15 +22,17 @@ echo ""
 echo ">>> Upgrading pip ..."
 pip install --upgrade pip setuptools wheel
 
-# ── 3. Install OpenRLHF + dependencies ──────────────────────────────────────
+# ── 3. Install Flash Attention 2 FIRST (needs torch in build env) ──────────
+#    Must come before openrlhf because openrlhf[vllm] depends on
+#    flash-attn==2.8.3 and pip cannot build it in an isolated env.
+echo ""
+echo ">>> Installing flash-attn (this may take 5-10 minutes) ..."
+pip install flash-attn==2.8.3 --no-build-isolation
+
+# ── 4. Install OpenRLHF + remaining dependencies ──────────────────────────
 echo ""
 echo ">>> Installing Python requirements ..."
 pip install -r requirements.txt
-
-# ── 4. Install Flash Attention 2 (compiled from source) ────────────────────
-echo ""
-echo ">>> Installing flash-attn (this may take several minutes) ..."
-pip install flash-attn --no-build-isolation
 
 # ── 5. Pre-download model & dataset so training starts immediately ──────────
 echo ""

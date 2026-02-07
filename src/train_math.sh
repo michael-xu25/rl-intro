@@ -40,20 +40,29 @@ echo ">>> Starting Ray head (1 GPU) ..."
 ray stop --force 2>/dev/null || true
 ray start --head --node-ip-address 0.0.0.0 --num-gpus 1
 
-# Wait for Ray agent to be ready (poll up to 60 seconds)
-echo ">>> Waiting for Ray agent to register ..."
-for i in $(seq 1 30); do
-    if ray status 2>&1 | grep -q "1.0 GPU"; then
-        echo "    Ray is ready (GPU detected)."
-        break
+# Wait for Ray dashboard agent to be ready (handles job submissions).
+# ray status showing GPUs is NOT enough — the dashboard agent starts later.
+echo ">>> Waiting for Ray dashboard agent ..."
+for i in $(seq 1 60); do
+    # Check if the dashboard job API is responding
+    if curl -s http://127.0.0.1:8265/api/version >/dev/null 2>&1; then
+        # Also verify GPU resources are registered
+        if ray status 2>&1 | grep -q "1.0 GPU"; then
+            echo "    Ray dashboard + GPU agent ready (${i}s)."
+            break
+        fi
     fi
-    if [ "$i" -eq 30 ]; then
-        echo "    WARNING: Timed out waiting for Ray GPU agent (60s)."
+    if [ "$i" -eq 60 ]; then
+        echo "    WARNING: Timed out waiting for Ray (120s)."
         echo "    Current Ray status:"
         ray status
+        echo "    Attempting job submit anyway ..."
     fi
     sleep 2
 done
+
+# Extra buffer — the agent endpoint can lag behind the dashboard API
+sleep 5
 
 # ── Build wandb flag ────────────────────────────────────────────────────────
 WANDB_FLAG=""
@@ -61,9 +70,11 @@ if [ -n "$WANDB_TOKEN" ]; then
     WANDB_FLAG="--use_wandb $WANDB_TOKEN"
 fi
 
-# ── Launch training ─────────────────────────────────────────────────────────
+# ── Launch training (with retry) ──────────────────────────────────────────
 echo ">>> Submitting GRPO training job ..."
-ray job submit --address="http://127.0.0.1:8265" \
+set +e  # allow retries on failure
+for attempt in 1 2 3; do
+    ray job submit --address="http://127.0.0.1:8265" \
     --runtime-env-json="{\"working_dir\": \"$(pwd)\"}" \
     -- python3 -m openrlhf.cli.train_ppo_ray \
     --ref_num_nodes 1 \
@@ -104,7 +115,20 @@ ray job submit --address="http://127.0.0.1:8265" \
     --save_steps 50 \
     --logging_steps 1 \
     --temperature 0.7 \
-    $WANDB_FLAG
+    $WANDB_FLAG \
+    && break  # success — exit retry loop
+
+    echo ""
+    if [ "$attempt" -lt 3 ]; then
+        echo "    Job submit failed (attempt $attempt/3). Retrying in 10s ..."
+        sleep 10
+    else
+        echo "    ERROR: Job submission failed after 3 attempts."
+        echo "    Try: ray stop --force && bash src/train_math.sh"
+        exit 1
+    fi
+done
+set -e  # restore strict mode
 
 echo ""
 echo ">>> Training complete!  LoRA adapter saved to: $SAVE_PATH"

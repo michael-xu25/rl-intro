@@ -1,5 +1,5 @@
-# OpenRLHF with vLLM acceleration
-openrlhf[vllm]
+# OpenRLHF (installed separately in setup_lightning.sh to skip flash-attn dep)
+# openrlhf
 
 # Lightning AI SDK (for studio management)
 lightning-sdk
@@ -9,6 +9,3 @@ wandb
 
 # HuggingFace datasets (for GSM8K)
 datasets
-
-# Flash Attention 2 (install separately -- see setup_lightning.sh)
-# flash-attn

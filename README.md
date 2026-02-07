@@ -15,7 +15,7 @@ git add -A && git commit -m "initial scaffold" && git push -u origin main
 
 ### 2. Clone on Lightning AI Studio
 
-Open a **Lightning AI Studio** with a GPU (A10G or A100), then:
+Open a **Lightning AI Studio** with a GPU (L4 recommended), then:
 
 ```bash
 cd ~
@@ -29,7 +29,7 @@ cd rl-intro
 bash setup_lightning.sh
 ```
 
-This installs OpenRLHF, flash-attn, and pre-downloads the model + dataset.
+This installs OpenRLHF and pre-downloads the model + dataset.
 
 ### 4. Run training
 

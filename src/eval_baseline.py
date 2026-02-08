@@ -179,8 +179,8 @@ with open(jsonl_path, "w") as f:
         results.append(record)
         f.write(json.dumps(record) + "\n")
 
-        # Print detailed output for first 15, then progress every 10
-        if i < 15:
+        # Print detailed output for first 25, then progress every 10
+        if i < 25:
             status = "CORRECT" if is_correct else "WRONG  "
             snippet = response[:500].replace('\n', '\n    ')
             if len(response) > 500:

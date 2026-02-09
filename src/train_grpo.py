@@ -34,7 +34,7 @@ logger.setLevel(logging.INFO)
 from datasets import load_dataset
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward, format_reward
+from reward_func import correctness_reward, reasoning_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
@@ -78,12 +78,12 @@ training_args = GRPOConfig(
     output_dir=f"./checkpoint/run_{RUN_TIMESTAMP}",
     run_name=f"grpo_{RUN_TIMESTAMP}",
 
-    # GRPO sampling — based on baseline eval analysis:
-    # - Model responses average 300 tokens (max 670), so 512 is safe
-    # - 8 generations gives meaningful advantage signal
-    # - temp=0.9 for diversity (some correct, some wrong → GRPO can learn)
+    # GRPO sampling — based on pass@16 analysis of 1.5B model:
+    # - pass@1=67.7%, pass@16=95%, 33 problems in RL sweet spot
+    # - avg response ~430 tokens on hard problems, so 1024 gives full room
+    # - 8 generations at temp=0.9 gives good mix of correct/wrong per group
     num_generations=8,
-    max_completion_length=512,
+    max_completion_length=1024,
     max_prompt_length=256,
     temperature=0.9,
 
@@ -126,7 +126,7 @@ trainer = GRPOTrainer(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[correctness_reward, format_reward],
+    reward_funcs=[correctness_reward, reasoning_reward],
     peft_config=peft_config,
 )
 

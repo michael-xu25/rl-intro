@@ -1,6 +1,6 @@
 # Tiny-Math-Solver
 
-Train **Qwen/Qwen2.5-0.5B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** with a **rule-based reward function** -- powered by [TRL](https://github.com/huggingface/trl).
+Train **Qwen/Qwen2.5-3B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** with a **rule-based reward function** -- powered by [TRL](https://github.com/huggingface/trl).
 
 No trained reward model needed. The reward function checks whether the model's numerical answer matches the ground truth.
 
@@ -8,7 +8,7 @@ No trained reward model needed. The reward function checks whether the model's n
 
 ### 1. Clone on Lightning AI Studio
 
-Open a **Lightning AI Studio** with a GPU (L4 recommended), then:
+Open a **Lightning AI Studio** with an H200 GPU, then:
 
 ```bash
 git clone https://github.com/michael-xu25/rl-intro.git
@@ -21,7 +21,15 @@ cd rl-intro
 bash setup_lightning.sh
 ```
 
-### 3. Run training
+### 3. Run Pass@16 capability test (before training)
+
+```bash
+python src/eval_pass_at_k.py
+```
+
+This generates 16 solutions per problem to determine if the model has latent reasoning capability that RL can reinforce.
+
+### 4. Run training
 
 ```bash
 bash src/train_math.sh
@@ -43,7 +51,9 @@ rl-intro/
 └── src/
     ├── train_math.sh           # Shell wrapper
     ├── train_grpo.py           # Training script (TRL GRPOTrainer)
-    └── reward_func.py          # Rule-based rewards (answer checker)
+    ├── reward_func.py          # Rule-based rewards (answer checker)
+    ├── eval_baseline.py        # Greedy baseline evaluation
+    └── eval_pass_at_k.py       # Pass@K capability test
 ```
 
 ## How It Works
@@ -52,15 +62,15 @@ rl-intro/
 GSM8K question
     │
     ▼
-Actor (Qwen 0.5B + LoRA)
-    │  generates 4 solutions per question
+Actor (Qwen 3B + LoRA)
+    │  generates 8 solutions per question
     ▼
 reward_func.py
     ├── correctness_reward: 1.0 if answer matches gold, else 0.0
-    └── format_reward:      0.5 if uses #### format, else 0.0
+    └── reasoning_reward:   partial credit for correct intermediate steps
     │
     ▼
-GRPO advantage = normalize rewards across the 4 samples
+GRPO advantage = normalize rewards across the 8 samples
     │
     ▼
 Update LoRA adapter
@@ -73,29 +83,16 @@ Edit `src/train_grpo.py` to tune:
 | Parameter | Default | Notes |
 |---|---|---|
 | `r` (LoRA rank) | 16 | Higher = more capacity, more memory |
-| `num_generations` | 4 | Samples per prompt (try 8 for better signal) |
-| `per_device_train_batch_size` | 1 | Increase on A100 |
-| `gradient_accumulation_steps` | 16 | Effective batch = this x per_device |
-| `learning_rate` | 5e-5 | Actor learning rate |
-| `temperature` | 0.7 | Generation temperature |
-
-## After Training
-
-The LoRA adapter is saved to `./checkpoint/qwen-0.5b-gsm8k-grpo`. To merge with base model:
-
-```python
-from peft import PeftModel
-from transformers import AutoModelForCausalLM
-
-base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-model = PeftModel.from_pretrained(base, "./checkpoint/qwen-0.5b-gsm8k-grpo")
-merged = model.merge_and_unload()
-merged.save_pretrained("./checkpoint/qwen-0.5b-gsm8k-merged")
-```
+| `num_generations` | 8 | Samples per prompt for GRPO |
+| `per_device_train_batch_size` | 4 | Prompts per micro-batch |
+| `gradient_accumulation_steps` | 4 | Effective batch = 16 prompts |
+| `learning_rate` | 1e-4 | LoRA learning rate |
+| `temperature` | 0.9 | Generation temperature |
+| `max_completion_length` | 1024 | Max tokens per completion |
 
 ## References
 
 - [TRL GRPO Trainer Docs](https://huggingface.co/docs/trl/main/grpo_trainer)
 - [GSM8K Dataset](https://huggingface.co/datasets/openai/gsm8k)
-- [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+- [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
 - [GRPO Paper (DeepSeekMath)](https://huggingface.co/papers/2402.03300)

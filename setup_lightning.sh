@@ -19,9 +19,9 @@ echo ""
 echo ">>> [2/3] Pre-downloading model ..."
 python3 -c "
 from transformers import AutoTokenizer, AutoModelForCausalLM
-print('Downloading Qwen/Qwen2.5-0.5B-Instruct ...')
-AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')
-AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')
+print('Downloading Qwen/Qwen2.5-3B-Instruct ...')
+AutoTokenizer.from_pretrained('Qwen/Qwen2.5-3B-Instruct')
+AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-3B-Instruct')
 print('Done.')
 "
 
@@ -30,7 +30,8 @@ echo ">>> [3/3] Pre-downloading GSM8K dataset ..."
 python3 -c "
 from datasets import load_dataset
 load_dataset('openai/gsm8k', 'main', split='train')
-print('GSM8K downloaded.')
+load_dataset('openai/gsm8k', 'main', split='test')
+print('GSM8K (train + test) downloaded.')
 "
 
 echo ""

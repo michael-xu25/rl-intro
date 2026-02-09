@@ -182,13 +182,11 @@ with open(jsonl_path, "w") as f:
         # Print detailed output for first 25, then progress every 10
         if i < 25:
             status = "CORRECT" if is_correct else "WRONG  "
-            snippet = response[:500].replace('\n', '\n    ')
-            if len(response) > 500:
-                snippet += "\n    ..."
+            formatted_response = response.replace('\n', '\n    ')
             print(f"[{i+1:3d}/{N_SAMPLES}] [{status}] gold={gold}  pred={pred}  "
                   f"method={method}  tokens={n_tokens}  truncated={truncated}")
-            print(f"  Q: {question[:120]}")
-            print(f"  A: {snippet}")
+            print(f"  Q: {question}")
+            print(f"  A: {formatted_response}")
             print()
         elif (i + 1) % 10 == 0:
             print(f"[{i+1:3d}/{N_SAMPLES}] {correct}/{total} correct so far "

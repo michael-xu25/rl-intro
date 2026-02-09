@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo ">>> Launching GRPO training ..."
-echo "    Model:   Qwen/Qwen2.5-3B-Instruct"
+echo "    Model:   Qwen/Qwen2.5-1.5B-Instruct"
 echo "    Dataset: GSM8K"
 echo "    Method:  GRPO + LoRA (rank 16)"
 echo ""

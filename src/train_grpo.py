@@ -110,7 +110,7 @@ training_args = GRPOConfig(
 
 # ── Log config ──────────────────────────────────────────────────────────────
 logger.info("Config:")
-logger.info(f"  Model:            Qwen/Qwen2.5-3B-Instruct")
+logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
 logger.info(f"  Batch size:       {training_args.per_device_train_batch_size}")
@@ -123,7 +123,7 @@ logger.info(f"  W&B:              {training_args.report_to}")
 
 # ── Trainer ─────────────────────────────────────────────────────────────────
 trainer = GRPOTrainer(
-    model="Qwen/Qwen2.5-3B-Instruct",
+    model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
     reward_funcs=[correctness_reward, format_reward],

@@ -26,7 +26,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ── Config ──────────────────────────────────────────────────────────────────
-MODEL = "Qwen/Qwen2.5-3B-Instruct"
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 N_PROBLEMS = 100
 K = 16                  # samples per problem
 TEMPERATURE = 0.7

@@ -1,6 +1,6 @@
 # Tiny-Math-Solver
 
-Train **Qwen/Qwen2.5-3B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** with a **rule-based reward function** -- powered by [TRL](https://github.com/huggingface/trl).
+Train **Qwen/Qwen2.5-1.5B-Instruct** to solve grade-school math problems (GSM8K) using **GRPO** with a **rule-based reward function** -- powered by [TRL](https://github.com/huggingface/trl).
 
 No trained reward model needed. The reward function checks whether the model's numerical answer matches the ground truth.
 
@@ -62,7 +62,7 @@ rl-intro/
 GSM8K question
     │
     ▼
-Actor (Qwen 3B + LoRA)
+Actor (Qwen 1.5B + LoRA)
     │  generates 8 solutions per question
     ▼
 reward_func.py
@@ -94,5 +94,5 @@ Edit `src/train_grpo.py` to tune:
 
 - [TRL GRPO Trainer Docs](https://huggingface.co/docs/trl/main/grpo_trainer)
 - [GSM8K Dataset](https://huggingface.co/datasets/openai/gsm8k)
-- [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
+- [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)
 - [GRPO Paper (DeepSeekMath)](https://huggingface.co/papers/2402.03300)

@@ -22,7 +22,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ── Config ──────────────────────────────────────────────────────────────────
-MODEL = "Qwen/Qwen2.5-3B-Instruct"
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 N_SAMPLES = 100
 MAX_NEW_TOKENS = 1024
 SEED = 42

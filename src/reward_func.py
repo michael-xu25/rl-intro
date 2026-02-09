@@ -1,16 +1,11 @@
 """
 Rule-Based Reward Functions for GSM8K Math Problems.
 
-Used by TRL's GRPOTrainer via the reward_funcs parameter.
-
-TRL reward function signature:
-    reward_func(completions, **kwargs) -> list[float]
-
-When using chat templates, `completions` is a list of conversation lists,
-e.g. [[{"role": "assistant", "content": "..."}]]. We extract the text
-from the last assistant message.
-
-Additional dataset columns (like 'answer') are passed as kwargs.
+Designed after analyzing 100 baseline eval samples of Qwen 0.5B Instruct:
+- Model naturally uses \\boxed{} format 76% of the time
+- 45% baseline accuracy
+- Main failure mode: comprehension errors (80% of wrong answers)
+- Parser must handle: \\boxed{}, last-number fallback, numeric comparison
 """
 
 import re
@@ -18,9 +13,8 @@ import logging
 
 logger = logging.getLogger("tiny_math_solver")
 
-# Track how many times correctness_reward is called (= training steps)
 _step_counter = 0
-LOG_EVERY = 10  # log sample outputs every N steps
+LOG_EVERY = 10
 
 
 def _get_text(completion) -> str:
@@ -28,7 +22,6 @@ def _get_text(completion) -> str:
     if isinstance(completion, str):
         return completion
     if isinstance(completion, list):
-        # Chat format: list of message dicts, grab last assistant content
         for msg in reversed(completion):
             if isinstance(msg, dict) and msg.get("content"):
                 return msg["content"]
@@ -36,116 +29,124 @@ def _get_text(completion) -> str:
     return str(completion)
 
 
+def _normalize_number(s: str) -> float | None:
+    """Convert a string number to float for numeric comparison."""
+    try:
+        return float(s.replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
 def extract_gold_answer(label: str) -> str | None:
     """Extract the number after '####' in a GSM8K answer."""
     match = re.search(r"####\s*([\d,]+(?:\.\d+)?)", label)
+    return match.group(1).replace(",", "") if match else None
+
+
+def extract_predicted_answer(text: str) -> tuple[str | None, str]:
+    """
+    Extract the model's final answer. Returns (answer, method).
+    Matches the model's natural behavior observed in baseline eval.
+    """
+    # 1. \boxed{<number>} -- model's preferred format (76% of responses)
+    match = re.search(r"\\boxed\{([\d,]+(?:\.\d+)?)\}", text)
     if match:
-        return match.group(1).replace(",", "")
-    return None
+        return match.group(1).replace(",", ""), "boxed"
 
-
-def extract_predicted_answer(text: str) -> str | None:
-    """
-    Extract the predicted number from model output.
-
-    Only matches explicit answer patterns -- no "last number" fallback,
-    because that picks up random intermediate numbers and creates noise.
-
-    Priority:
-      1. '#### <number>' (GSM8K format)
-      2. 'The answer is <number>'
-      3. '\\boxed{<number>}' (common math format)
-    """
-    # Strategy 1: #### pattern
+    # 2. #### <number> (GSM8K format, rare but possible after training)
     match = re.search(r"####\s*([\d,]+(?:\.\d+)?)", text)
     if match:
-        return match.group(1).replace(",", "")
+        return match.group(1).replace(",", ""), "####"
 
-    # Strategy 2: "the answer is <number>"
+    # 3. "the answer is <number>"
     match = re.search(
         r"[Tt]he\s+(?:final\s+)?answer\s+is\s*:?\s*\$?\s*([\d,]+(?:\.\d+)?)", text
     )
     if match:
-        return match.group(1).replace(",", "")
+        return match.group(1).replace(",", ""), "the_answer_is"
 
-    # Strategy 3: \boxed{<number>}
-    match = re.search(r"\\boxed\{([\d,]+(?:\.\d+)?)\}", text)
-    if match:
-        return match.group(1).replace(",", "")
+    # 4. **<number>** (bold)
+    matches = re.findall(r"\*\*([\d,]+(?:\.\d+)?)\*\*", text)
+    if matches:
+        return matches[-1].replace(",", ""), "bold"
 
-    # Strategy 4: bold or highlighted answer at end: **<number>**
-    match = re.search(r"\*\*([\d,]+(?:\.\d+)?)\*\*\s*$", text.strip())
-    if match:
-        return match.group(1).replace(",", "")
+    # 5. Last number in text (fallback -- actually reliable per eval analysis)
+    numbers = re.findall(r"[\d,]+(?:\.\d+)?", text)
+    if numbers:
+        return numbers[-1].replace(",", ""), "last_number_fallback"
 
-    return None
+    return None, "no_answer"
+
+
+def _numbers_match(pred: str, gold: str) -> bool:
+    """Numeric comparison instead of string comparison. Handles '38.00' == '38'."""
+    pred_f = _normalize_number(pred)
+    gold_f = _normalize_number(gold)
+    if pred_f is None or gold_f is None:
+        return False
+    return abs(pred_f - gold_f) < 1e-6
 
 
 def correctness_reward(completions, answer, **kwargs) -> list[float]:
     """
-    Binary reward: 1.0 if the model's answer matches the gold answer, else 0.0.
-
-    Args:
-        completions: Model-generated responses.
-        answer: Gold answers from GSM8K (format: "reasoning...\n#### 42").
+    Core reward: 1.0 if numerically correct, 0.0 otherwise.
+    Uses numeric comparison (not string) to avoid false negatives.
     """
     global _step_counter
     _step_counter += 1
 
     rewards = []
-    samples = []  # collect for logging
+    samples = []
     for completion, gold_label in zip(completions, answer):
         text = _get_text(completion)
         gold = extract_gold_answer(gold_label)
-        pred = extract_predicted_answer(text)
-        correct = gold is not None and pred is not None and pred == gold
+        pred, method = extract_predicted_answer(text)
+        correct = gold is not None and pred is not None and _numbers_match(pred, gold)
         rewards.append(1.0 if correct else 0.0)
-        samples.append((text, gold, pred, correct))
+        samples.append((text, gold, pred, method, correct))
 
-    # Log samples: every step for first 5, then every LOG_EVERY steps
+    # Log samples: every step for first 5, then every LOG_EVERY
     should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
     if should_log:
-        n_correct = sum(r for r in rewards)
-        n_parsed = sum(1 for _, _, pred, _ in samples if pred is not None)
+        n_correct = int(sum(rewards))
+        n_parsed = sum(1 for _, _, pred, _, _ in samples if pred is not None)
         print(flush=True)
         print(f"{'='*70}", flush=True)
         print(f"  REWARD DEBUG (step {_step_counter}) — "
-              f"{int(n_correct)}/{len(rewards)} correct, "
-              f"{n_parsed}/{len(rewards)} had parseable answer", flush=True)
+              f"{n_correct}/{len(rewards)} correct, "
+              f"{n_parsed}/{len(rewards)} parsed", flush=True)
         print(f"{'='*70}", flush=True)
-        # Show up to 4 samples
-        for i, (text, gold, pred, correct) in enumerate(samples[:4]):
-            snippet = text[:400].replace('\n', ' ↵ ')
-            if len(text) > 400:
+        for i, (text, gold, pred, method, correct) in enumerate(samples[:4]):
+            snippet = text[:500].replace('\n', ' | ')
+            if len(text) > 500:
                 snippet += "..."
             status = "CORRECT" if correct else "WRONG  "
-            print(f"  [{status}] gold={gold}  pred={pred}", flush=True)
+            print(f"  [{status}] gold={gold}  pred={pred}  method={method}", flush=True)
             print(f"  Output: {snippet}", flush=True)
             print(f"  ---", flush=True)
-        print(f"{'='*70}", flush=True)
-        print(flush=True)
+        print(f"{'='*70}\n", flush=True)
 
     return rewards
 
 
 def format_reward(completions, **kwargs) -> list[float]:
     """
-    Format reward: encourages the model to clearly state its answer.
+    Reward clear answer formatting. Based on baseline eval:
+    - \\boxed{} is the model's natural format (76% usage) → reward it
+    - Other explicit formats get partial credit
+    - No answer format → 0.0
 
-    +0.5 for '#### <number>' format
-    +0.3 for 'The answer is <number>'
-    +0.1 for any clear answer pattern (boxed, bold)
-    0.0 for no clear answer
+    This encourages the model to clearly state answers (makes parsing reliable).
     """
     rewards = []
     for completion in completions:
         text = _get_text(completion)
-        if re.search(r"####\s*[\d,]+", text):
+        if re.search(r"\\boxed\{[\d,]+(?:\.\d+)?\}", text):
+            rewards.append(0.5)   # natural format, reward it
+        elif re.search(r"####\s*[\d,]+", text):
             rewards.append(0.5)
         elif re.search(r"[Tt]he\s+(?:final\s+)?answer\s+is\s*:?\s*\$?\s*[\d,]+", text):
             rewards.append(0.3)
-        elif re.search(r"\\boxed\{[\d,]+", text) or re.search(r"\*\*[\d,]+\*\*\s*$", text.strip()):
-            rewards.append(0.1)
         else:
             rewards.append(0.0)
     return rewards

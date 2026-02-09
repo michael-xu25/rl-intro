@@ -44,15 +44,14 @@ logger.info(f"Log file: {LOG_FILE}")
 # GSM8K has 'question' and 'answer' columns.
 # TRL expects a 'prompt' column with chat messages.
 
-SYSTEM_PROMPT = (
-    "Solve the math problem. Keep your reasoning short. "
-    "End your response with 'The answer is <number>'."
-)
-
 def build_prompt(example):
-    """Convert GSM8K question to chat format for Qwen Instruct."""
+    """Convert GSM8K question to chat format for Qwen Instruct.
+
+    No system prompt -- baseline eval showed the model naturally uses
+    \\boxed{} format 76% of the time and doesn't need format guidance.
+    Let RL discover better reasoning, don't force a format.
+    """
     example["prompt"] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": example["question"]},
     ]
     return example
@@ -79,20 +78,23 @@ training_args = GRPOConfig(
     output_dir=f"./checkpoint/run_{RUN_TIMESTAMP}",
     run_name=f"grpo_{RUN_TIMESTAMP}",
 
-    # GRPO sampling
-    num_generations=8,              # 8 samples per prompt → stronger advantage signal
-    max_completion_length=512,      # model needs room to reason + state answer
+    # GRPO sampling — based on baseline eval analysis:
+    # - Model responses average 300 tokens (max 670), so 512 is safe
+    # - 8 generations gives meaningful advantage signal
+    # - temp=0.9 for diversity (some correct, some wrong → GRPO can learn)
+    num_generations=8,
+    max_completion_length=512,
     max_prompt_length=256,
-    temperature=0.9,                # higher temp → more diverse samples → better signal
+    temperature=0.9,
 
-    # Training
+    # Training — H200/A100 config
     num_train_epochs=1,
-    per_device_train_batch_size=4,  # 4 prompts per micro-batch
-    gradient_accumulation_steps=4,  # effective batch = 4*4 = 16 prompts
-    max_steps=200,                  # cap at 200 steps for this run
-    learning_rate=2e-4,             # LoRA can handle higher LR
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,  # effective batch = 16 prompts
+    max_steps=200,                  # ~1hr on H200, extend later
+    learning_rate=1e-4,             # moderate LR for LoRA
     lr_scheduler_type="cosine",
-    warmup_ratio=0.03,              # shorter warmup, start learning sooner
+    warmup_ratio=0.03,
     bf16=True,
     gradient_checkpointing=True,
 

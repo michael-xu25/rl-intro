@@ -143,7 +143,13 @@ with open(jsonl_path, "w") as f:
         pred, method = extract_predicted_answer(response)
         format_counts[method] += 1
 
-        is_correct = gold is not None and pred is not None and pred == gold
+        # Numeric comparison (not string) -- "38.00" should match "38"
+        def _nums_match(a, b):
+            try:
+                return abs(float(a.replace(",", "")) - float(b.replace(",", ""))) < 1e-6
+            except (ValueError, TypeError, AttributeError):
+                return False
+        is_correct = gold is not None and pred is not None and _nums_match(pred, gold)
         if pred is not None:
             parsed += 1
         if is_correct:

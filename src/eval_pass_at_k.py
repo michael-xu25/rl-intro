@@ -154,8 +154,8 @@ with open(jsonl_path, "w") as f:
         n_correct = 0
         methods = Counter()
         token_counts = []
-        correct_sample = None
-        wrong_sample = None
+        correct_samples = []   # ALL correct responses (full text)
+        wrong_samples = []     # ALL wrong responses (full text)
         predictions = []
 
         for seq_i in range(K):
@@ -176,29 +176,28 @@ with open(jsonl_path, "w") as f:
 
             if is_correct:
                 n_correct += 1
-                if correct_sample is None:
-                    correct_sample = response
+                correct_samples.append(response)
             else:
-                if wrong_sample is None:
-                    wrong_sample = response
+                wrong_samples.append(response)
 
         pass_rate = n_correct / K
         total_correct_at_1 += pass_rate
         if n_correct > 0:
             total_pass_at_k += 1
 
-        # Save structured result
+        # Save structured result (full samples for downstream SFT extraction)
         record = {
             "idx": idx,
             "question": question,
+            "gold_label": gold_label,
             "gold_answer": gold,
             "n_correct": n_correct,
             "n_total": K,
             "pass_rate": round(pass_rate, 4),
             "methods_used": dict(methods),
             "avg_tokens": round(sum(token_counts) / len(token_counts), 1),
-            "correct_sample": correct_sample[:500] if correct_sample else None,
-            "wrong_sample": wrong_sample[:500] if wrong_sample else None,
+            "correct_samples": correct_samples,   # full text, all correct
+            "wrong_samples": wrong_samples,        # full text, all wrong
         }
         all_results.append(record)
         f.write(json.dumps(record) + "\n")
@@ -213,11 +212,11 @@ with open(jsonl_path, "w") as f:
         if prob_i < 10:
             q_short = question[:120] + ("..." if len(question) > 120 else "")
             print(f"         Q: {q_short}")
-            if correct_sample:
-                c_short = correct_sample[:200].replace('\n', ' | ')
+            if correct_samples:
+                c_short = correct_samples[0][:200].replace('\n', ' | ')
                 print(f"         Correct: {c_short}...")
-            if wrong_sample and n_correct < K:
-                w_short = wrong_sample[:200].replace('\n', ' | ')
+            if wrong_samples and n_correct < K:
+                w_short = wrong_samples[0][:200].replace('\n', ' | ')
                 print(f"         Wrong:   {w_short}...")
             print()
 

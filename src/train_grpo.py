@@ -34,7 +34,13 @@ logger.setLevel(logging.INFO)
 from datasets import load_dataset
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward, reasoning_reward
+from reward_func import (
+    correctness_reward,
+    reasoning_reward,
+    format_reward,
+    hallucination_penalty,
+    repetition_penalty,
+)
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
@@ -108,9 +114,19 @@ training_args = GRPOConfig(
 )
 
 
+# ── Model selection (supports SFT warm-up checkpoint) ──────────────────────
+# If SFT_CHECKPOINT env var is set, start GRPO from that checkpoint instead
+# of the raw base model. This is the "teach the model to be its best self"
+# step from the hybrid training approach.
+SFT_CHECKPOINT = os.environ.get("SFT_CHECKPOINT", None)
+MODEL_NAME = SFT_CHECKPOINT if SFT_CHECKPOINT else "Qwen/Qwen2.5-1.5B-Instruct"
+
+
 # ── Log config ──────────────────────────────────────────────────────────────
 logger.info("Config:")
-logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
+logger.info(f"  Model:            {MODEL_NAME}")
+if SFT_CHECKPOINT:
+    logger.info(f"  SFT checkpoint:   {SFT_CHECKPOINT}")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
 logger.info(f"  Batch size:       {training_args.per_device_train_batch_size}")
@@ -122,11 +138,24 @@ logger.info(f"  W&B:              {training_args.report_to}")
 
 
 # ── Trainer ─────────────────────────────────────────────────────────────────
+# Five thematic reward functions (from gap analysis):
+#   correctness_reward:    0.0 or 1.0  — final answer match (dominant signal)
+#   reasoning_reward:      0.0 - 0.5   — intermediate step verification
+#   format_reward:         0.0 - 0.2   — structured step-by-step reasoning
+#   hallucination_penalty: -0.3 - 0.0  — penalize ungrounded numbers
+#   repetition_penalty:    -0.2 - 0.0  — penalize reasoning loops
+# Total range: -0.5 to 1.7, correctness always dominates.
 trainer = GRPOTrainer(
-    model="Qwen/Qwen2.5-1.5B-Instruct",
+    model=MODEL_NAME,
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[correctness_reward, reasoning_reward],
+    reward_funcs=[
+        correctness_reward,
+        reasoning_reward,
+        format_reward,
+        hallucination_penalty,
+        repetition_penalty,
+    ],
     peft_config=peft_config,
 )
 

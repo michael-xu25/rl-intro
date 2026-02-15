@@ -1,21 +1,22 @@
 """
-Rule-Based Reward Functions for Entity-Tracking GRPO on GSM8K.
+Rule-Based Reward Functions for GRPO on GSM8K.
 
 Designed from Pass@16 analysis of Qwen2.5-1.5B-Instruct:
 - pass@1: 67.7%, pass@16: 95%
 - Key failure mode: entity tracking (forgetting people/items in multi-entity problems)
 - Training dataset: GSM8K filtered to 3+ entity problems
 
-Two reward functions:
-  1. correctness_reward:         1.0 if final answer matches gold, 0.0 otherwise
-  2. intermediate_step_reward:   0.0-0.5 partial credit for correct intermediate
-                                 computation results (extracted from gold <<...>> annotations)
+Active reward:
+  correctness_reward:  1.0 if final answer matches gold, 0.0 otherwise
 
-Design principle: rewards MUST vary across completions within a GRPO group
-to produce non-zero gradients. The old entity_tracking_reward failed because
-all completions mentioned the same entity names → identical scores → zero gradient.
-intermediate_step_reward succeeds because different completions compute different
-intermediate values correctly, creating real within-group variance.
+GRPO learns from the within-group contrast: when some completions get 1.0
+and others get 0.0, the correct ones get positive advantage and the wrong
+ones get negative advantage. No auxiliary rewards needed.
+
+Legacy (kept but unused):
+  intermediate_step_reward:  partial credit for intermediate computation values.
+  Dropped because it added no useful within-group variance -- all completions
+  tended to produce the same intermediate numbers.
 """
 
 from __future__ import annotations

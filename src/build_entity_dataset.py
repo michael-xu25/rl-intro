@@ -4,8 +4,7 @@ Build Entity-Tracking Dataset from GSM8K.
 Filters GSM8K training set to problems with 3+ named entities
 (people/items the model must track individually).
 
-Adds an 'entities' column with pre-extracted entity names for each problem,
-used by the entity_tracking_reward during GRPO training.
+Adds an 'entities' column with pre-extracted entity names for each problem.
 
 Usage:
     python src/build_entity_dataset.py

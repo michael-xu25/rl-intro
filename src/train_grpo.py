@@ -17,9 +17,10 @@ Ghost-batching mitigation:
   - KL penalty (beta) prevents policy drift from noisy updates
   - DAPO loss normalizes across active tokens in the global batch
 
-Generation: transformers paged attention (avoids KV cache padding waste).
-We do NOT use vLLM colocate -- PEFT + vLLM has known convergence bugs
-(github.com/huggingface/trl/issues/2856, vllm-project/vllm/issues/14483).
+Generation: vanilla model.generate() -- no vLLM, no paged attention.
+vLLM colocate has PEFT convergence bugs (trl#2856, vllm#14483).
+Paged attention runs out of cache blocks at our batch size.
+For 1.5B on L40S, vanilla generation is fast enough (~5GB KV cache).
 
 Usage:
     bash setup.sh                        # install deps + build dataset (once)
@@ -113,13 +114,14 @@ training_args = GRPOConfig(
     max_completion_length=1024,
     temperature=1.0,
 
-    # ── Generation: transformers paged attention ───────────────────────
-    # Avoids KV cache padding waste → faster than vanilla model.generate.
-    # We do NOT use vLLM colocate: PEFT + vLLM has known convergence
-    # bugs across multiple TRL/vLLM versions. Paged attention is slower
-    # but reliable with LoRA.
+    # ── Generation ──────────────────────────────────────────────────────
+    # Plain model.generate() -- no vLLM, no paged attention.
+    # vLLM colocate: PEFT + vLLM has known convergence bugs (trl#2856).
+    # Paged attention: runs out of cache blocks at our batch size (128
+    # sequences × 1024 tokens exceeds the default block pool).
+    # For 1.5B on L40S (48GB), vanilla generation is fast enough and
+    # the KV cache (~5GB for 128 sequences) fits easily.
     use_vllm=False,
-    use_transformers_paged=True,
 
     # ── Ghost-batching mitigation ──────────────────────────────────────
     # With entity-only filtering (~33% of problems in sweet spot), most
@@ -191,7 +193,7 @@ logger.info(f"  Temperature:      {training_args.temperature}")
 logger.info(f"  Max compl len:    {training_args.max_completion_length}")
 logger.info(f"  Max steps:        {training_args.max_steps}")
 logger.info(f"  Mask truncated:   {training_args.mask_truncated_completions}")
-logger.info(f"  Generation:       transformers paged attention (no vLLM)")
+logger.info(f"  Generation:       model.generate() (no vLLM, no paged attn)")
 logger.info(f"  Output dir:       {training_args.output_dir}")
 logger.info(f"  W&B:              {training_args.report_to}")
 

@@ -17,13 +17,13 @@ Ghost-batching mitigation:
   - KL penalty (beta) prevents policy drift from noisy updates
   - DAPO loss normalizes across active tokens in the global batch
 
-Generation: vLLM in colocate mode (shares GPU with training). Configured
-for L40S (48GB) -- vLLM gets 40% of VRAM, training gets the rest.
-Sleep mode frees vLLM memory during backward pass.
+Generation: transformers paged attention (avoids KV cache padding waste).
+We do NOT use vLLM colocate -- PEFT + vLLM has known convergence bugs
+(github.com/huggingface/trl/issues/2856, vllm-project/vllm/issues/14483).
 
 Usage:
-    python src/build_entity_dataset.py   # build curated dataset (once)
-    python src/train_grpo.py             # train (vLLM starts automatically)
+    bash setup.sh                        # install deps + build dataset (once)
+    python src/train_grpo.py             # train
     accelerate launch src/train_grpo.py  # multi-GPU
 """
 
@@ -109,25 +109,17 @@ training_args = GRPOConfig(
     # GRPO sampling
     # - 8 completions per prompt at temp=1.0 for diverse reasoning paths
     # - 1024 completion length for <think> section + answer
-    # - 300 prompt length accommodates system prompt (~40 tokens)
     num_generations=8,
     max_completion_length=1024,
-    max_prompt_length=300,
     temperature=1.0,
 
-    # ── vLLM generation (massive speedup over model.generate) ──────────
-    # Colocate mode: vLLM runs in the same process, sharing the GPU with
-    # training. For L40S (48GB): cap vLLM at 40% (~19GB) leaving ~29GB
-    # for LoRA training (model weights ~3GB + optimizer ~0.2GB +
-    # activations ~4GB with gradient checkpointing).
-    # Sleep mode offloads vLLM KV cache during backward pass to avoid
-    # memory pressure on the training side.
-    # If OOM during backward pass, lower gpu_memory_utilization to 0.3.
-    use_vllm=True,
-    vllm_mode="colocate",
-    vllm_gpu_memory_utilization=0.4,
-    vllm_tensor_parallel_size=1,
-    vllm_enable_sleep_mode=True,
+    # ── Generation: transformers paged attention ───────────────────────
+    # Avoids KV cache padding waste → faster than vanilla model.generate.
+    # We do NOT use vLLM colocate: PEFT + vLLM has known convergence
+    # bugs across multiple TRL/vLLM versions. Paged attention is slower
+    # but reliable with LoRA.
+    use_vllm=False,
+    use_transformers_paged=True,
 
     # ── Ghost-batching mitigation ──────────────────────────────────────
     # With entity-only filtering (~33% of problems in sweet spot), most
@@ -196,13 +188,10 @@ logger.info(f"  Effective batch:  {eff_batch} sequences = {unique_prompts_per_st
 logger.info(f"  Learning rate:    {training_args.learning_rate}")
 logger.info(f"  Beta (KL pen.):   {training_args.beta}")
 logger.info(f"  Temperature:      {training_args.temperature}")
-logger.info(f"  Max prompt len:   {training_args.max_prompt_length}")
 logger.info(f"  Max compl len:    {training_args.max_completion_length}")
 logger.info(f"  Max steps:        {training_args.max_steps}")
 logger.info(f"  Mask truncated:   {training_args.mask_truncated_completions}")
-logger.info(f"  vLLM:             {training_args.use_vllm} (mode={training_args.vllm_mode}, "
-            f"mem={training_args.vllm_gpu_memory_utilization}, "
-            f"sleep={training_args.vllm_enable_sleep_mode})")
+logger.info(f"  Generation:       transformers paged attention (no vLLM)")
 logger.info(f"  Output dir:       {training_args.output_dir}")
 logger.info(f"  W&B:              {training_args.report_to}")
 

@@ -54,7 +54,7 @@ logger.setLevel(logging.INFO)
 from datasets import load_from_disk
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward
+from reward_func import correctness_reward, format_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
@@ -186,7 +186,7 @@ unique_prompts_per_step = eff_batch // training_args.num_generations
 
 logger.info("Config:")
 logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
-logger.info(f"  Mode:             GRPO (correctness-only reward)")
+logger.info(f"  Mode:             GRPO (correctness + format reward)")
 logger.info(f"  System prompt:    {ENTITY_TRACKING_PROMPT[:60]}...")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
@@ -212,7 +212,7 @@ trainer = GRPOTrainer(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[correctness_reward],
+    reward_funcs=[correctness_reward, format_reward],
     peft_config=peft_config,
 )
 

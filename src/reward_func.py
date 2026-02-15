@@ -6,12 +6,14 @@ Designed from Pass@16 analysis of Qwen2.5-1.5B-Instruct:
 - Key failure mode: entity tracking (forgetting people/items in multi-entity problems)
 - Training dataset: GSM8K filtered to 3+ entity problems
 
-Active reward:
-  correctness_reward:  1.0 if final answer matches gold, 0.0 otherwise
+Active rewards:
+  1. correctness_reward:  1.0 if final answer matches gold, 0.0 otherwise
+  2. format_reward:       0.1 if answer is wrapped in \\boxed{}, 0.0 otherwise
 
-GRPO learns from the within-group contrast: when some completions get 1.0
-and others get 0.0, the correct ones get positive advantage and the wrong
-ones get negative advantage. No auxiliary rewards needed.
+The format reward prevents RL from degrading the model's answer formatting.
+Without it, the model may stop using \\boxed{} since correctness_reward
+extracts answers via multiple fallback methods -- the model gets rewarded
+the same whether it formats nicely or dumps a bare number.
 
 Legacy (kept but unused):
   intermediate_step_reward:  partial credit for intermediate computation values.
@@ -183,7 +185,30 @@ def correctness_reward(completions, answer, **kwargs) -> list[float]:
     return rewards
 
 
-# ── Reward function 2: Intermediate Step Accuracy ────────────────────────────
+# ── Reward function 2: Format ─────────────────────────────────────────────────
+
+def format_reward(completions, **kwargs) -> list[float]:
+    """
+    Small reward for presenting the final answer in \\boxed{}.
+
+    Returns 0.1 if the completion contains \\boxed{<number>}, 0.0 otherwise.
+    This prevents RL from degrading the model's formatting -- without it,
+    the model learns that bare numbers get the same correctness reward as
+    nicely boxed answers, and may stop formatting.
+
+    The 0.1 magnitude is intentionally small relative to correctness (1.0)
+    so it never overrides the math signal, but large enough that GRPO
+    slightly prefers boxed completions when correctness is tied.
+    """
+    rewards = []
+    for completion in completions:
+        text = _get_text(completion)
+        has_boxed = bool(re.search(r"\\boxed\{[\d,]+(?:\.\d+)?\}", text))
+        rewards.append(0.1 if has_boxed else 0.0)
+    return rewards
+
+
+# ── Legacy: Intermediate Step Accuracy (unused) ──────────────────────────────
 
 def intermediate_step_reward(completions, answer, **kwargs) -> list[float]:
     """

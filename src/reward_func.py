@@ -7,10 +7,18 @@ Designed from Pass@16 analysis of Qwen2.5-1.5B-Instruct:
 - Training dataset: GSM8K filtered to 3+ entity problems
 
 Two reward functions:
-  1. correctness_reward:      1.0 if final answer matches gold, 0.0 otherwise
-  2. entity_tracking_reward:  0.0-0.5 partial credit for each entity accounted for
-                              (name mentioned + number computed nearby in <think>)
+  1. correctness_reward:         1.0 if final answer matches gold, 0.0 otherwise
+  2. intermediate_step_reward:   0.0-0.5 partial credit for correct intermediate
+                                 computation results (extracted from gold <<...>> annotations)
+
+Design principle: rewards MUST vary across completions within a GRPO group
+to produce non-zero gradients. The old entity_tracking_reward failed because
+all completions mentioned the same entity names → identical scores → zero gradient.
+intermediate_step_reward succeeds because different completions compute different
+intermediate values correctly, creating real within-group variance.
 """
+
+from __future__ import annotations
 
 import re
 import logging
@@ -107,45 +115,28 @@ def extract_predicted_answer(text: str) -> tuple[str | None, str]:
     return None, "no_answer"
 
 
-# ── Entity tracking helpers ──────────────────────────────────────────────────
+# ── Intermediate step helpers ────────────────────────────────────────────────
 
-def _extract_think_section(text: str) -> str:
-    """Extract content inside <think>...</think> tags, or fall back to full text."""
-    match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return text
+def _extract_intermediate_values(gold_answer: str) -> list[float]:
+    """Extract intermediate computation results from GSM8K gold solution.
 
+    GSM8K gold answers contain annotations like:
+        "16 + 20 = <<16+20=36>>36"
+        "$430 + $320 = <<430+320=750>>$750"
 
-def _entity_has_computation(entity_name: str, text: str) -> bool:
-    """Check if an entity name appears near a number in the text.
+    This extracts the result values after '=' inside <<...>>: [36.0, 750.0, ...]
+    These are the key intermediate steps the model should reproduce.
 
-    Looks for the entity name followed by a number within ~200 characters.
-    This checks that the model actually computed something for this entity,
-    not just mentioned the name in passing.
-
-    Examples that match:
-        "Kim raises $320 + $430 = $750"     (Kim + number nearby)
-        "Alexandra: $430"                    (Alexandra + number nearby)
-        "Sarah, who raises $300"             (Sarah + number nearby)
-
-    Examples that don't match:
-        "We need to find the total for all"  (no entity name)
-        "Kim is one of the girls"            (name but no number nearby)
+    Returns sorted list (not set) for deterministic behavior.
     """
-    # Search for entity name followed (within 200 chars) by a number
-    # The number can be preceded by $, =, :, etc.
-    pattern = re.escape(entity_name) + r"[\s\S]{0,200}?[\$=:\s][\d,]+(?:\.\d+)?"
-    if re.search(pattern, text, re.IGNORECASE):
-        return True
-
-    # Also check reverse: number followed by entity name (less common but valid)
-    # e.g., "$750 for Kim"
-    pattern_rev = r"[\d,]+(?:\.\d+)?[\s\S]{0,50}?" + re.escape(entity_name)
-    if re.search(pattern_rev, text, re.IGNORECASE):
-        return True
-
-    return False
+    results = []
+    seen = set()
+    for match in re.finditer(r"<<[^>]+=([^>]+)>>", gold_answer):
+        val = _normalize_number(match.group(1).strip())
+        if val is not None and val not in seen:
+            seen.add(val)
+            results.append(val)
+    return sorted(results)
 
 
 # ── Reward function 1: Correctness ──────────────────────────────────────────
@@ -191,73 +182,96 @@ def correctness_reward(completions, answer, **kwargs) -> list[float]:
     return rewards
 
 
-# ── Reward function 2: Entity Tracking ──────────────────────────────────────
+# ── Reward function 2: Intermediate Step Accuracy ────────────────────────────
 
-def entity_tracking_reward(completions, entities, **kwargs) -> list[float]:
+def intermediate_step_reward(completions, answer, **kwargs) -> list[float]:
     """
-    Partial credit for each entity the model explicitly accounts for.
+    Partial credit for correctly computing intermediate values.
 
-    For each entity name in the pre-extracted `entities` list (from the
-    curated dataset), checks if the model's output:
-    1. Mentions the entity name
-    2. Has a number computed within ~200 characters of that mention
+    Extracts intermediate computation results from the gold answer's
+    <<expr=result>> annotations and checks how many appear in each completion.
 
-    Score = (entities with name + nearby number) / (total entities) * 0.5
+    WHY THIS WORKS FOR GRPO:
+    The old entity_tracking_reward gave identical scores to all completions
+    (all mention same names → std=0 → zero gradient). This reward VARIES
+    because different completions compute different intermediate steps
+    correctly. E.g. for intermediates {36, 750, 1450}:
+      - Completion A might produce {36, 750, 1450} → score=0.5
+      - Completion B might produce {36, 680, 1360} → score=0.167
+      - Completion C might produce {40, 800, 1600} → score=0.0
+    This creates the within-group variance GRPO needs for learning.
+
+    Score = (matching intermediates) / (total intermediates) * 0.5
     Max reward: 0.5 (correctness_reward at 1.0 always dominates)
-
-    This provides gradient signal even when the final answer is wrong:
-    a model that tracked 3/4 entities but made an arithmetic error
-    gets 0.375, while one that only tracked 1/4 entities gets 0.125.
     """
     rewards = []
     debug_info = []
 
-    for completion, entity_list in zip(completions, entities):
+    for completion, gold_label in zip(completions, answer):
         text = _get_text(completion)
 
-        # Parse entity_list -- may be a list or a JSON string
-        if isinstance(entity_list, str):
-            import json
-            try:
-                entity_list = json.loads(entity_list)
-            except (json.JSONDecodeError, TypeError):
-                entity_list = []
+        # Get intermediate values from gold solution
+        gold_intermediates = _extract_intermediate_values(gold_label)
 
-        # Need at least 2 entities for this reward to be meaningful
-        if not entity_list or len(entity_list) < 2:
+        if not gold_intermediates:
             rewards.append(0.0)
-            debug_info.append(("skip", 0, 0, []))
+            debug_info.append(("no_intermediates", [], set(), set()))
             continue
 
-        # Prefer <think> section, fall back to full text
-        reasoning_text = _extract_think_section(text)
+        # Extract all numbers the model produced
+        completion_numbers = _extract_all_numbers(text)
 
-        # Check each entity
-        tracked = []
-        for entity_name in entity_list:
-            found = _entity_has_computation(entity_name, reasoning_text)
-            tracked.append((entity_name, found))
+        # Check which gold intermediates appear in the completion
+        # Use numeric matching (handles formatting differences: 1,000 vs 1000)
+        matched = set()
+        for gold_val in gold_intermediates:
+            for comp_val in completion_numbers:
+                if abs(gold_val - comp_val) < 1e-6:
+                    matched.add(gold_val)
+                    break
 
-        n_found = sum(1 for _, f in tracked if f)
-        n_total = len(entity_list)
+        # Exclude the final answer from intermediate credit --
+        # we don't want to double-count with correctness_reward.
+        # The final answer is the last intermediate value.
+        final_answer_match = re.search(r"####\s*([\d,]+(?:\.\d+)?)", gold_label)
+        if final_answer_match:
+            final_val = _normalize_number(final_answer_match.group(1))
+            if final_val is not None:
+                gold_intermediates_no_final = [v for v in gold_intermediates if abs(v - final_val) > 1e-6]
+                matched_no_final = {v for v in matched if abs(v - final_val) > 1e-6}
+            else:
+                gold_intermediates_no_final = gold_intermediates
+                matched_no_final = matched
+        else:
+            gold_intermediates_no_final = gold_intermediates
+            matched_no_final = matched
 
-        # Score = fraction of entities tracked, scaled to [0, 0.5]
-        score = (n_found / n_total) * 0.5
+        n_total = len(gold_intermediates_no_final)
+        if n_total == 0:
+            rewards.append(0.0)
+            debug_info.append(("no_intermediates", [], set(), set()))
+            continue
+
+        n_matched = len(matched_no_final)
+
+        # Score: fraction of intermediate steps matched, scaled to [0, 0.5]
+        score = (n_matched / n_total) * 0.5
         rewards.append(score)
-        debug_info.append(("scored", n_total, n_found, tracked))
+        debug_info.append(("scored", gold_intermediates_no_final, matched_no_final, completion_numbers))
 
-    # Debug logging (on same schedule as correctness)
+    # Debug logging
     should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
     if should_log:
         avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        print(f"  ENTITY TRACKING (step {_step_counter}) — avg={avg_reward:.3f}", flush=True)
-        for i, (status, n_total, n_found, tracked) in enumerate(debug_info[:4]):
+        print(f"\n  INTERMEDIATE STEPS (step {_step_counter}) — avg={avg_reward:.3f}", flush=True)
+        for i, (status, gold_ints, matched, comp_nums) in enumerate(debug_info[:4]):
             if status == "scored":
-                entity_str = ", ".join(
-                    f"{name}={'Y' if f else 'N'}" for name, f in tracked
-                )
-                print(f"  [{i}] {n_found}/{n_total} entities tracked → "
-                      f"reward={rewards[i]:.3f}  [{entity_str}]", flush=True)
+                n_total = len(gold_ints)
+                n_matched = len(matched)
+                gold_str = [int(v) if v == int(v) else v for v in gold_ints]
+                match_str = [int(v) if v == int(v) else v for v in sorted(matched)]
+                print(f"  [{i}] {n_matched}/{n_total} intermediates matched → "
+                      f"reward={rewards[i]:.3f}  gold={gold_str} matched={match_str}", flush=True)
             else:
                 print(f"  [{i}] {status} → reward=0.0", flush=True)
         print(flush=True)

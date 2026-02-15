@@ -18,11 +18,11 @@ if [ ! -d "data/entity_tracking_dataset" ]; then
 fi
 
 # Step 2: Launch training
-echo ">>> Launching Entity-Tracking GRPO training ..."
+echo ">>> Launching GRPO training ..."
 echo "    Model:   Qwen/Qwen2.5-1.5B-Instruct"
 echo "    Dataset: GSM8K (filtered to 3+ entity problems)"
 echo "    Method:  GRPO + LoRA (rank 16) + <think> tags"
-echo "    Rewards: correctness (0/1) + entity tracking (0-0.5)"
+echo "    Rewards: correctness (0/1) + intermediate step accuracy (0-0.5)"
 echo ""
 
 python src/train_grpo.py

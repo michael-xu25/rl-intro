@@ -1,9 +1,16 @@
 """
-Tiny-Math-Solver — Entity-Tracking GRPO on GSM8K with TRL.
+Tiny-Math-Solver — GRPO on GSM8K with TRL.
 
 Trains Qwen2.5-1.5B-Instruct on a curated subset of GSM8K problems
-requiring 3+ entity tracking, using <think> tags for structured reasoning
-and an entity-tracking reward for partial credit.
+requiring 3+ entity tracking, using <think> tags for structured reasoning.
+
+Reward functions:
+  - correctness_reward (0/1): final answer matches gold
+  - intermediate_step_reward (0-0.5): partial credit for correct intermediate
+    computation values from gold <<expr=result>> annotations.
+
+    This reward VARIES across completions (unlike the old entity_tracking_reward
+    where all completions got identical scores), giving GRPO real gradients.
 
 Usage:
     # First, build the curated dataset:
@@ -42,16 +49,17 @@ logger.setLevel(logging.INFO)
 from datasets import load_from_disk
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward, entity_tracking_reward
+from reward_func import correctness_reward, intermediate_step_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
-# Curated entity-tracking dataset (built by src/build_entity_dataset.py).
-# Contains GSM8K problems with 3+ named entities, plus an 'entities' column.
-# TRL expects a 'prompt' column with chat messages.
+# Curated dataset (built by src/build_entity_dataset.py).
+# Contains GSM8K problems with 3+ named entities (the model's weak spot).
+# The 'answer' column has gold solutions with <<expr=result>> annotations
+# used by intermediate_step_reward. TRL expects a 'prompt' column.
 
 ENTITY_TRACKING_PROMPT = (
     "Think step by step inside <think> tags before answering. "
@@ -129,7 +137,7 @@ training_args = GRPOConfig(
 # ── Log config ──────────────────────────────────────────────────────────────
 logger.info("Config:")
 logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
-logger.info(f"  Mode:             Entity-Tracking GRPO")
+logger.info(f"  Mode:             GRPO (correctness + intermediate steps)")
 logger.info(f"  System prompt:    {ENTITY_TRACKING_PROMPT[:60]}...")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
@@ -148,7 +156,7 @@ trainer = GRPOTrainer(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[correctness_reward, entity_tracking_reward],
+    reward_funcs=[correctness_reward, intermediate_step_reward],
     peft_config=peft_config,
 )
 

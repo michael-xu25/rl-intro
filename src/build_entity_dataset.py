@@ -44,24 +44,56 @@ COMMON_NON_NAMES = {
     "But", "And", "Or", "So", "Yet", "Then", "Than", "Also",
     "An", "A", "As", "Be", "Do", "Is", "Was", "Are", "Were",
     "Has", "Had", "Have", "Can", "Could", "Would", "Should",
-    "Not", "No", "Yes",
+    "Not", "No", "Yes", "Both", "Many", "Most", "Only",
 
     # Math/problem words that get capitalized
     "Step", "Answer", "Total", "Calculate", "Find", "Determine",
     "Given", "Let", "Solve", "Note", "Problem", "Solution",
+    "Half", "Twice", "Double", "Triple", "Quarter",
 
     # Common non-person proper nouns in GSM8K
     "UV", "Art", "TV", "DVD", "GPS", "ATM", "GPA", "SAT", "ACT",
-    "NFL", "NBA", "MLB", "USA", "US", "UK",
+    "NFL", "NBA", "MLB", "USA", "US", "UK", "PM", "AM",
+
+    # Places and geography
+    "North", "South", "East", "West", "Central",
+    "City", "Town", "Street", "Avenue", "Road", "Park", "Drive",
+    "Lake", "River", "Mountain", "Island", "Valley", "Beach", "Bay",
+    "York", "Angeles", "Francisco", "Diego",
+    "America", "American", "European", "African", "Asian",
+    "German", "French", "Chinese", "Japanese", "Italian", "Spanish",
+    "English", "British", "Mexican", "Canadian",
+
+    # Organizations / landmarks / brands
+    "Facebook", "Instagram", "Twitter", "YouTube", "Amazon", "Google",
+    "Metropolitan", "Museum", "Library", "University", "College",
+    "Hospital", "Church", "Airport", "Station",
+    "National", "International", "Local", "Royal",
+    "Walmart", "Target", "Costco",
 
     # Common nouns that may appear capitalized at sentence start
     "Student", "Students", "Teacher", "Teachers", "Farmer", "Class",
     "Children", "People", "Workers", "Company", "Store", "School",
     "Family", "Friends", "Team", "Group", "Member", "Members",
+    "Boy", "Girl", "Boys", "Girls", "Man", "Woman", "Men", "Women",
+    "Brother", "Sister", "Mother", "Father", "Uncle", "Aunt",
+    "Son", "Daughter", "Husband", "Wife", "Baby",
+    "Mom", "Dad", "Grandma", "Grandpa", "Grandad",
+    "Grandmother", "Grandfather", "Cousin", "Neighbor",
+    "Day", "Week", "Month", "Year", "Hour", "Minute",
+    "Morning", "Afternoon", "Evening", "Night",
+
+    # Genres / categories / game names appearing in GSM8K
+    "Western", "Eastern", "Northern", "Southern",
+    "Lego", "Legos", "Scrabble", "Pokemon",
+    "Junior", "Senior", "Little", "Big", "Great",
+    "Christmas", "Easter", "Halloween", "Thanksgiving",
 
     # Ordinals and misc
     "First", "Second", "Third", "Fourth", "Fifth", "Last", "Next",
-    "New", "Old",
+    "New", "Old", "Once", "Twice", "Per", "Plus",
+    "Currently", "Originally", "Recently", "Finally",
+    "However", "Therefore", "Meanwhile", "Although",
 
     # Titles (the name usually follows)
     "Mr", "Mrs", "Ms", "Dr", "Prof", "Sir",
@@ -71,18 +103,39 @@ COMMON_NON_NAMES = {
 ALL_EXCLUSIONS = DAYS | MONTHS | COMMON_NON_NAMES
 
 
+def _strip_possessive(name: str) -> str:
+    """Strip possessive forms: Boyd's -> Boyd, Boyds -> Boyd, Amilia's -> Amilia.
+
+    Handles both apostrophe possessives and bare-s possessives.
+    Avoids stripping 's' from names that naturally end in 's' (James, Charles)
+    by only stripping if the base form is 3+ characters.
+    """
+    # "Boyd's" or "Amilia's" -> strip "'s"
+    if name.endswith("'s") and len(name) > 3:
+        return name[:-2]
+    # "Boyds" (no apostrophe) -> strip "s" if base is 3+ chars
+    # But don't strip from names like "James", "Charles" -- we check
+    # if it ends in a consonant + 's' pattern typical of possessives
+    if (name.endswith("s")
+            and not name.endswith("ss")  # "Ross", "Jess"
+            and len(name) > 3):
+        return name[:-1]
+    return name
+
+
 def extract_entity_names(question: str) -> list[str]:
     """Extract entity names (proper nouns) from a GSM8K question.
 
     Strategy:
     1. Split text into sentences
-    2. For each sentence, skip the first word (always capitalized)
-    3. Find remaining capitalized words (2+ chars, alphabetic)
-    4. Filter out known non-names
-    5. Deduplicate (case-preserving, case-insensitive)
+    2. For each sentence, find capitalized words (2+ chars, alphabetic)
+    3. Strip possessives (Boyd's -> Boyd, Boyds -> Boyd)
+    4. Filter out known non-names (places, brands, common words)
+    5. Filter: both the raw form AND base form must pass exclusion check
+    6. Deduplicate (case-insensitive, also dedup base forms)
 
-    Also captures the first word of the question if it looks like a name
-    (i.e., not in the exclusion list).
+    First word of each sentence is included only if it's clearly a name
+    (not in the exclusion list).
     """
     # Split into sentences on . ? ! and also handle newlines
     sentences = re.split(r'[.?!\n]+', question)
@@ -94,19 +147,7 @@ def extract_entity_names(question: str) -> list[str]:
         if not words:
             continue
 
-        # Check the FIRST word of each sentence:
-        # It's always capitalized, but if it's a name (not in exclusions),
-        # we should still capture it.
-        first_clean = re.sub(r"[^a-zA-Z']", "", words[0])
-        if (first_clean
-                and first_clean[0].isupper()
-                and len(first_clean) >= 2
-                and first_clean not in ALL_EXCLUSIONS
-                and first_clean.rstrip("'s") not in ALL_EXCLUSIONS):
-            candidates.append(first_clean.rstrip("'s"))
-
-        # Check remaining words
-        for word in words[1:]:
+        for idx, word in enumerate(words):
             clean = re.sub(r"[^a-zA-Z']", "", word)
             if not clean or len(clean) < 2:
                 continue
@@ -116,10 +157,17 @@ def extract_entity_names(question: str) -> list[str]:
             # Must not be ALL uppercase (acronyms handled in exclusions)
             if clean.isupper() and len(clean) > 2:
                 continue
-            # Strip possessive 's
-            name = clean.rstrip("'s") if clean.endswith("'s") else clean
-            if name not in ALL_EXCLUSIONS and len(name) >= 2:
-                candidates.append(name)
+
+            # Strip possessive to get base name
+            base = _strip_possessive(clean)
+
+            # Both raw and base form must pass exclusion filter
+            if base in ALL_EXCLUSIONS or clean in ALL_EXCLUSIONS:
+                continue
+            if len(base) < 2:
+                continue
+
+            candidates.append(base)
 
     # Deduplicate case-insensitively, preserving first occurrence
     seen = set()

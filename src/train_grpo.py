@@ -129,14 +129,15 @@ training_args = GRPOConfig(
     # A small effective batch means some updates see NO useful signal at all,
     # causing massive W&B noise.
     #
-    # Fix: accumulate over 32 mini-batches so each optimizer step sees
-    # ~128 prompts. Even if only 33% produce gradient, that's ~40 useful
-    # prompts per update -- enough for a stable direction.
+    # Fix: accumulate over 16 mini-batches so each optimizer step sees
+    # 64 prompts. Even if only 33% produce gradient, that's ~20 useful
+    # prompts per update -- enough for a reasonable direction.
+    # (32 was designed for vLLM; 16 balances signal vs wall-clock time
+    # with vanilla model.generate on L40S: ~7 hrs for 500 steps.)
     per_device_train_batch_size=4,
-    gradient_accumulation_steps=32,  # effective batch = 4*32 = 128 prompts
-    #                                  128 / 8 generations = 16 unique prompts
-    #                                  per accumulation step, 16*32=512 total
-    #                                  sequences before each weight update
+    gradient_accumulation_steps=16,  # effective batch = 4*16 = 64 prompts
+    #                                  64 / 8 generations = 8 unique prompts
+    #                                  per accumulation step
 
     # Training schedule
     num_train_epochs=1,
@@ -166,6 +167,7 @@ training_args = GRPOConfig(
     logging_steps=1,
     save_steps=50,
     log_completions=True,            # log (prompt, completion) pairs to W&B
+    num_completions_to_print=2,      # only print 2 examples to terminal
     report_to="wandb" if os.environ.get("WANDB_TOKEN") else "none",
 
     # Misc

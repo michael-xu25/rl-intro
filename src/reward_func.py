@@ -1,25 +1,19 @@
 """
-Rule-Based Reward Functions for GSM8K Math Problems.
+Rule-Based Reward Functions for Entity-Tracking GRPO on GSM8K.
 
 Designed from Pass@16 analysis of Qwen2.5-1.5B-Instruct:
 - pass@1: 67.7%, pass@16: 95%
-- 33 problems in 1-10/16 range (RL sweet spot)
-- Dominant error: comprehension (misreading which number modifies which noun)
-- GSM8K gold labels contain <<expr=result>> intermediate step annotations
+- Key failure mode: entity tracking (forgetting people/items in multi-entity problems)
+- Training dataset: GSM8K filtered to 3+ entity problems
 
-Five reward functions (thematic approach from gap analysis):
-  1. correctness_reward:   1.0 if final answer matches gold, 0.0 otherwise
-  2. reasoning_reward:     0.0-0.5 partial credit for correct intermediate steps
-  3. format_reward:        0.0-0.2 for structured step-by-step reasoning
-  4. hallucination_penalty: -0.3-0.0 penalty for introducing ungrounded numbers
-  5. repetition_penalty:   -0.2-0.0 penalty for repeated reasoning patterns
-
-Total reward range: -0.5 to 1.7, with correctness always dominant.
+Two reward functions:
+  1. correctness_reward:      1.0 if final answer matches gold, 0.0 otherwise
+  2. entity_tracking_reward:  0.0-0.5 partial credit for each entity accounted for
+                              (name mentioned + number computed nearby in <think>)
 """
 
 import re
 import logging
-from collections import Counter
 
 logger = logging.getLogger("tiny_math_solver")
 
@@ -113,32 +107,45 @@ def extract_predicted_answer(text: str) -> tuple[str | None, str]:
     return None, "no_answer"
 
 
-# ── Gold step extraction (for reasoning reward) ─────────────────────────────
+# ── Entity tracking helpers ──────────────────────────────────────────────────
 
-def extract_gold_steps(gold_label: str) -> list[float]:
-    """Extract intermediate calculation results from GSM8K gold labels.
+def _extract_think_section(text: str) -> str:
+    """Extract content inside <think>...</think> tags, or fall back to full text."""
+    match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    return text
 
-    GSM8K format: "320+430=<<320+430=750>>750 dollars."
-    The <<expression=result>> markers contain intermediate computation results.
 
-    Returns list of floats: [750.0, 700.0, 2280.0]
+def _entity_has_computation(entity_name: str, text: str) -> bool:
+    """Check if an entity name appears near a number in the text.
+
+    Looks for the entity name followed by a number within ~200 characters.
+    This checks that the model actually computed something for this entity,
+    not just mentioned the name in passing.
+
+    Examples that match:
+        "Kim raises $320 + $430 = $750"     (Kim + number nearby)
+        "Alexandra: $430"                    (Alexandra + number nearby)
+        "Sarah, who raises $300"             (Sarah + number nearby)
+
+    Examples that don't match:
+        "We need to find the total for all"  (no entity name)
+        "Kim is one of the girls"            (name but no number nearby)
     """
-    raw = re.findall(r"<<[^=]+=([^>]+)>>", gold_label)
-    results = []
-    for r in raw:
-        val = _normalize_number(r.strip())
-        if val is not None:
-            results.append(val)
-    return results
+    # Search for entity name followed (within 200 chars) by a number
+    # The number can be preceded by $, =, :, etc.
+    pattern = re.escape(entity_name) + r"[\s\S]{0,200}?[\$=:\s][\d,]+(?:\.\d+)?"
+    if re.search(pattern, text, re.IGNORECASE):
+        return True
 
+    # Also check reverse: number followed by entity name (less common but valid)
+    # e.g., "$750 for Kim"
+    pattern_rev = r"[\d,]+(?:\.\d+)?[\s\S]{0,50}?" + re.escape(entity_name)
+    if re.search(pattern_rev, text, re.IGNORECASE):
+        return True
 
-def extract_question_numbers(question: str) -> set[float]:
-    """Extract all numbers that appear in the question text.
-
-    Used to filter out intermediate step results that are just restating
-    input values (no evidence the model actually computed them).
-    """
-    return _extract_all_numbers(question)
+    return False
 
 
 # ── Reward function 1: Correctness ──────────────────────────────────────────
@@ -184,299 +191,75 @@ def correctness_reward(completions, answer, **kwargs) -> list[float]:
     return rewards
 
 
-# ── Reward function 2: Reasoning (intermediate step verification) ────────────
+# ── Reward function 2: Entity Tracking ──────────────────────────────────────
 
-def reasoning_reward(completions, answer, question, **kwargs) -> list[float]:
+def entity_tracking_reward(completions, entities, **kwargs) -> list[float]:
     """
-    Partial credit for correct intermediate computation steps.
+    Partial credit for each entity the model explicitly accounts for.
 
-    Uses GSM8K's <<expression=result>> annotations in gold labels.
-    For each intermediate result that appears in the model's response
-    (but NOT in the question), award partial credit.
+    For each entity name in the pre-extracted `entities` list (from the
+    curated dataset), checks if the model's output:
+    1. Mentions the entity name
+    2. Has a number computed within ~200 characters of that mention
 
-    Scaled to [0.0, 0.5] so correctness_reward (1.0) always dominates.
+    Score = (entities with name + nearby number) / (total entities) * 0.5
+    Max reward: 0.5 (correctness_reward at 1.0 always dominates)
 
     This provides gradient signal even when the final answer is wrong:
-    a model that computed 3/4 intermediate steps correctly understood
-    more of the problem than one that computed 0/4.
+    a model that tracked 3/4 entities but made an arithmetic error
+    gets 0.375, while one that only tracked 1/4 entities gets 0.125.
     """
     rewards = []
     debug_info = []
 
-    for completion, gold_label, q in zip(completions, answer, question):
+    for completion, entity_list in zip(completions, entities):
         text = _get_text(completion)
 
-        # Step 1: Extract all intermediate computation results from gold label
-        all_gold_steps = extract_gold_steps(gold_label)
+        # Parse entity_list -- may be a list or a JSON string
+        if isinstance(entity_list, str):
+            import json
+            try:
+                entity_list = json.loads(entity_list)
+            except (json.JSONDecodeError, TypeError):
+                entity_list = []
 
-        # Step 2: Need at least 2 steps (1 intermediate + 1 final) for this
-        # reward to be meaningful. Single-step problems → no partial credit.
-        if len(all_gold_steps) < 2:
+        # Need at least 2 entities for this reward to be meaningful
+        if not entity_list or len(entity_list) < 2:
             rewards.append(0.0)
             debug_info.append(("skip", 0, 0, []))
             continue
 
-        # Step 3: Drop the LAST step -- it equals the final answer,
-        # which is already rewarded by correctness_reward. No double counting.
-        intermediate_steps = all_gold_steps[:-1]
+        # Prefer <think> section, fall back to full text
+        reasoning_text = _extract_think_section(text)
 
-        # Step 4: Get numbers from the question. We exclude intermediate
-        # results that match question numbers because finding "430" in the
-        # response when the question says "$430" doesn't prove computation.
-        question_nums = extract_question_numbers(q)
+        # Check each entity
+        tracked = []
+        for entity_name in entity_list:
+            found = _entity_has_computation(entity_name, reasoning_text)
+            tracked.append((entity_name, found))
 
-        # Step 5: Keep only intermediate results NOT in the question
-        unique_steps = []
-        for step_val in intermediate_steps:
-            # Check if this value appears in the question
-            in_question = any(abs(step_val - qn) < 1e-6 for qn in question_nums)
-            if not in_question:
-                unique_steps.append(step_val)
+        n_found = sum(1 for _, f in tracked if f)
+        n_total = len(entity_list)
 
-        if not unique_steps:
-            rewards.append(0.0)
-            debug_info.append(("no_unique", len(intermediate_steps), 0, []))
-            continue
-
-        # Step 6: Extract all numbers from the model's response
-        response_numbers = _extract_all_numbers(text)
-
-        # Step 7: Check which unique intermediate results appear in response
-        found_steps = []
-        for step_val in unique_steps:
-            found = any(abs(step_val - rn) < 1e-6 for rn in response_numbers)
-            found_steps.append((step_val, found))
-
-        n_found = sum(1 for _, f in found_steps if f)
-        n_total = len(unique_steps)
-
-        # Step 8: Score = fraction of unique intermediate steps found, scaled to [0, 0.5]
+        # Score = fraction of entities tracked, scaled to [0, 0.5]
         score = (n_found / n_total) * 0.5
         rewards.append(score)
-        debug_info.append(("scored", n_total, n_found, found_steps))
+        debug_info.append(("scored", n_total, n_found, tracked))
 
     # Debug logging (on same schedule as correctness)
     should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
     if should_log:
         avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        print(f"  REASONING (step {_step_counter}) — avg={avg_reward:.3f}", flush=True)
-        for i, (status, n_total, n_found, steps) in enumerate(debug_info[:4]):
+        print(f"  ENTITY TRACKING (step {_step_counter}) — avg={avg_reward:.3f}", flush=True)
+        for i, (status, n_total, n_found, tracked) in enumerate(debug_info[:4]):
             if status == "scored":
-                step_str = ", ".join(
-                    f"{v:.0f}={'Y' if f else 'N'}" for v, f in steps
+                entity_str = ", ".join(
+                    f"{name}={'Y' if f else 'N'}" for name, f in tracked
                 )
-                print(f"  [{i}] {n_found}/{n_total} steps found → "
-                      f"reward={rewards[i]:.3f}  [{step_str}]", flush=True)
+                print(f"  [{i}] {n_found}/{n_total} entities tracked → "
+                      f"reward={rewards[i]:.3f}  [{entity_str}]", flush=True)
             else:
                 print(f"  [{i}] {status} → reward=0.0", flush=True)
-        print(flush=True)
-
-    return rewards
-
-
-# ── Reward function 3: Format (structured reasoning) ────────────────────────
-
-def format_reward(completions, **kwargs) -> list[float]:
-    """
-    Reward structured step-by-step reasoning. Scaled to [0.0, 0.2].
-
-    Checks for evidence of organized problem-solving:
-      - Numbered steps or transitional phrases ("Step 1:", "First,", "1.")
-      - A clearly marked final answer (\\boxed{}, ####, "the answer is")
-      - Penalizes responses that jump straight to an answer with no work
-
-    This targets "early termination" and "format failure" error modes
-    identified in gap analysis.
-    """
-    rewards = []
-    debug_info = []
-
-    for completion in completions:
-        text = _get_text(completion)
-        score = 0.0
-        reasons = []
-
-        # ── Check 1: Step-by-step structure (0.0 - 0.10) ───────────────
-        # Look for numbered steps, bullet points, or transitional phrases
-        step_patterns = [
-            r"(?:Step|step)\s+\d",             # "Step 1", "step 2"
-            r"^\s*\d+\.\s",                    # "1. ", "2. " at line start
-            r"(?:First|Second|Third|Next|Then|Finally)[,:]",  # transitions
-            r"^\s*[-*]\s",                     # bullet points
-        ]
-        n_step_markers = 0
-        for pattern in step_patterns:
-            n_step_markers += len(re.findall(pattern, text, re.MULTILINE))
-
-        if n_step_markers >= 3:
-            score += 0.10
-            reasons.append(f"steps={n_step_markers}")
-        elif n_step_markers >= 1:
-            score += 0.05
-            reasons.append(f"steps={n_step_markers}")
-
-        # ── Check 2: Clear final answer format (0.0 - 0.05) ────────────
-        has_boxed = bool(re.search(r"\\boxed\{", text))
-        has_hash = bool(re.search(r"####", text))
-        has_answer_phrase = bool(re.search(
-            r"[Tt]he\s+(?:final\s+)?answer\s+is", text
-        ))
-        if has_boxed or has_hash or has_answer_phrase:
-            score += 0.05
-            fmt = "boxed" if has_boxed else ("####" if has_hash else "phrase")
-            reasons.append(f"answer_fmt={fmt}")
-
-        # ── Check 3: Not too short (penalize bare answers) (0.0 - 0.05)
-        word_count = len(text.split())
-        if word_count >= 30:
-            score += 0.05
-            reasons.append(f"words={word_count}")
-        elif word_count < 10:
-            # Bare answer with no reasoning at all → no format reward
-            score = 0.0
-            reasons = ["too_short"]
-
-        rewards.append(round(score, 3))
-        debug_info.append(reasons)
-
-    # Debug logging
-    should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
-    if should_log:
-        avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        print(f"  FORMAT (step {_step_counter}) — avg={avg_reward:.3f}", flush=True)
-        for i, reasons in enumerate(debug_info[:4]):
-            print(f"  [{i}] reward={rewards[i]:.3f}  [{', '.join(reasons)}]",
-                  flush=True)
-        print(flush=True)
-
-    return rewards
-
-
-# ── Reward function 4: Hallucination penalty (number grounding) ──────────────
-
-def hallucination_penalty(completions, answer, question, **kwargs) -> list[float]:
-    """
-    Penalize introducing numbers that appear neither in the question nor in
-    any valid intermediate computation step. Scaled to [-0.3, 0.0].
-
-    This targets "premise mismatch" errors where the model invents quantities
-    (e.g., using "$500" when the question says "$430").
-
-    Numbers <= 10 are ignored as they commonly appear as counters, ordinals,
-    or small multipliers that don't indicate hallucination.
-    """
-    rewards = []
-    debug_info = []
-
-    for completion, gold_label, q in zip(completions, answer, question):
-        text = _get_text(completion)
-
-        # Build the set of "grounded" numbers: question + gold intermediate steps
-        question_nums = extract_question_numbers(q)
-        gold_steps = extract_gold_steps(gold_label)
-        grounded_nums = question_nums | set(gold_steps)
-
-        # Extract all numbers from the model's response
-        response_nums = _extract_all_numbers(text)
-
-        # Filter to "suspicious" numbers: > 10 and not grounded
-        ungrounded = set()
-        for rn in response_nums:
-            if rn <= 10:
-                continue  # skip small numbers (counters, ordinals)
-            is_grounded = any(abs(rn - gn) < 1e-6 for gn in grounded_nums)
-            if not is_grounded:
-                ungrounded.add(rn)
-
-        # Penalty: proportional to fraction of response numbers that are ungrounded
-        # Only count non-trivial numbers (> 10) in the denominator
-        nontrivial_response = {rn for rn in response_nums if rn > 10}
-        if not nontrivial_response:
-            penalty = 0.0
-        else:
-            hallucination_ratio = len(ungrounded) / len(nontrivial_response)
-            # Scale: 0% ungrounded → 0.0, 100% ungrounded → -0.3
-            penalty = -0.3 * hallucination_ratio
-
-        rewards.append(round(penalty, 3))
-        debug_info.append((len(ungrounded), len(nontrivial_response),
-                          sorted(ungrounded)[:5]))
-
-    # Debug logging
-    should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
-    if should_log:
-        avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        print(f"  HALLUCINATION (step {_step_counter}) — avg={avg_reward:.3f}",
-              flush=True)
-        for i, (n_ungrounded, n_total, examples) in enumerate(debug_info[:4]):
-            print(f"  [{i}] {n_ungrounded}/{n_total} ungrounded → "
-                  f"penalty={rewards[i]:.3f}  examples={examples}",
-                  flush=True)
-        print(flush=True)
-
-    return rewards
-
-
-# ── Reward function 5: Repetition penalty ────────────────────────────────────
-
-def repetition_penalty(completions, **kwargs) -> list[float]:
-    """
-    Penalize responses with repeated reasoning patterns. Scaled to [-0.2, 0.0].
-
-    Detects two types of repetition:
-      1. N-gram repetition: trigrams appearing 3+ times (reasoning loop)
-      2. Line repetition: exact duplicate lines (copy-paste loop)
-
-    This targets "repetition/logical loop" errors from gap analysis.
-    """
-    rewards = []
-    debug_info = []
-
-    for completion in completions:
-        text = _get_text(completion)
-        penalty = 0.0
-
-        # ── Check 1: Trigram repetition ratio ───────────────────────────
-        words = text.lower().split()
-        trigram_ratio = 0.0
-        if len(words) >= 5:
-            trigrams = [tuple(words[i:i+3]) for i in range(len(words) - 2)]
-            counts = Counter(trigrams)
-            repeated = sum(1 for t in trigrams if counts[t] >= 3)
-            trigram_ratio = repeated / len(trigrams)
-
-        # ── Check 2: Repeated lines ─────────────────────────────────────
-        lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 15]
-        line_counts = Counter(lines)
-        max_line_repeat = max(line_counts.values()) if line_counts else 0
-
-        # ── Combine into penalty ────────────────────────────────────────
-        # Trigram repetition: ratio > 0.15 starts incurring penalty
-        if trigram_ratio > 0.15:
-            # Scale: 0.15 → 0.0, 0.60 → -0.15 (linear)
-            trigram_penalty = -0.15 * min((trigram_ratio - 0.15) / 0.45, 1.0)
-            penalty += trigram_penalty
-
-        # Line repetition: any line repeated 3+ times incurs penalty
-        if max_line_repeat >= 3:
-            # Scale: 3 repeats → -0.05, 6+ repeats → -0.10
-            line_penalty = -0.05 * min(max_line_repeat / 3, 2.0)
-            penalty += line_penalty
-
-        # Clamp to [-0.2, 0.0]
-        penalty = max(penalty, -0.2)
-        rewards.append(round(penalty, 3))
-        debug_info.append((round(trigram_ratio, 3), max_line_repeat))
-
-    # Debug logging
-    should_log = _step_counter <= 5 or _step_counter % LOG_EVERY == 0
-    if should_log:
-        avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        print(f"  REPETITION (step {_step_counter}) — avg={avg_reward:.3f}",
-              flush=True)
-        for i, (tri_ratio, max_rep) in enumerate(debug_info[:4]):
-            print(f"  [{i}] trigram_ratio={tri_ratio}, max_line_repeat={max_rep} → "
-                  f"penalty={rewards[i]:.3f}", flush=True)
         print(flush=True)
 
     return rewards

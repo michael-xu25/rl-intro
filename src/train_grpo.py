@@ -1,7 +1,15 @@
 """
-Tiny-Math-Solver — GRPO training on GSM8K with TRL.
+Tiny-Math-Solver — Entity-Tracking GRPO on GSM8K with TRL.
+
+Trains Qwen2.5-1.5B-Instruct on a curated subset of GSM8K problems
+requiring 3+ entity tracking, using <think> tags for structured reasoning
+and an entity-tracking reward for partial credit.
 
 Usage:
+    # First, build the curated dataset:
+    python src/build_entity_dataset.py
+
+    # Then train:
     python src/train_grpo.py
     # or with accelerate for multi-GPU:
     accelerate launch src/train_grpo.py
@@ -31,42 +39,44 @@ _root_logger.addHandler(_file_handler)
 logger = logging.getLogger("tiny_math_solver")
 logger.setLevel(logging.INFO)
 
-from datasets import load_dataset
+from datasets import load_from_disk
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import (
-    correctness_reward,
-    reasoning_reward,
-    format_reward,
-    hallucination_penalty,
-    repetition_penalty,
-)
+from reward_func import correctness_reward, entity_tracking_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
-# GSM8K has 'question' and 'answer' columns.
+# Curated entity-tracking dataset (built by src/build_entity_dataset.py).
+# Contains GSM8K problems with 3+ named entities, plus an 'entities' column.
 # TRL expects a 'prompt' column with chat messages.
 
-def build_prompt(example):
-    """Convert GSM8K question to chat format for Qwen Instruct.
+ENTITY_TRACKING_PROMPT = (
+    "Think step by step inside <think> tags before answering. "
+    "For each person or item in the problem, explicitly state "
+    "what you know about them and calculate their value."
+)
 
-    No system prompt -- baseline eval showed the model naturally uses
-    \\boxed{} format 76% of the time and doesn't need format guidance.
-    Let RL discover better reasoning, don't force a format.
+
+def build_prompt(example):
+    """Convert GSM8K question to chat format with <think> tag instruction.
+
+    The system prompt forces structured entity-by-entity reasoning,
+    creating diverse completions that GRPO can learn from.
     """
     example["prompt"] = [
+        {"role": "system", "content": ENTITY_TRACKING_PROMPT},
         {"role": "user", "content": example["question"]},
     ]
     return example
 
 
-logger.info("Loading GSM8K dataset ...")
-dataset = load_dataset("openai/gsm8k", "main", split="train")
+logger.info("Loading entity-tracking dataset ...")
+dataset = load_from_disk("data/entity_tracking_dataset")
 dataset = dataset.map(build_prompt)
-logger.info(f"Dataset loaded: {len(dataset)} examples")
+logger.info(f"Dataset loaded: {len(dataset)} entity-tracking problems")
 
 
 # ── LoRA config ─────────────────────────────────────────────────────────────
@@ -84,14 +94,16 @@ training_args = GRPOConfig(
     output_dir=f"./checkpoint/run_{RUN_TIMESTAMP}",
     run_name=f"grpo_{RUN_TIMESTAMP}",
 
-    # GRPO sampling — based on pass@16 analysis of 1.5B model:
-    # - pass@1=67.7%, pass@16=95%, 33 problems in RL sweet spot
-    # - avg response ~430 tokens on hard problems, so 1024 gives full room
-    # - 8 generations at temp=0.9 gives good mix of correct/wrong per group
+    # GRPO sampling — entity-tracking config:
+    # - Dataset filtered to 3+ entity problems (model's weak spot)
+    # - <think> tags create structurally diverse reasoning paths
+    # - temp=1.0 for maximum diversity across 8 generations
+    # - 1024 completion length gives room for <think> section + answer
+    # - 300 prompt length accommodates system prompt (~40 tokens)
     num_generations=8,
     max_completion_length=1024,
-    max_prompt_length=256,
-    temperature=0.9,
+    max_prompt_length=300,
+    temperature=1.0,
 
     # Training — H200/A100 config
     num_train_epochs=1,
@@ -114,48 +126,29 @@ training_args = GRPOConfig(
 )
 
 
-# ── Model selection (supports SFT warm-up checkpoint) ──────────────────────
-# If SFT_CHECKPOINT env var is set, start GRPO from that checkpoint instead
-# of the raw base model. This is the "teach the model to be its best self"
-# step from the hybrid training approach.
-SFT_CHECKPOINT = os.environ.get("SFT_CHECKPOINT", None)
-MODEL_NAME = SFT_CHECKPOINT if SFT_CHECKPOINT else "Qwen/Qwen2.5-1.5B-Instruct"
-
-
 # ── Log config ──────────────────────────────────────────────────────────────
 logger.info("Config:")
-logger.info(f"  Model:            {MODEL_NAME}")
-if SFT_CHECKPOINT:
-    logger.info(f"  SFT checkpoint:   {SFT_CHECKPOINT}")
+logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
+logger.info(f"  Mode:             Entity-Tracking GRPO")
+logger.info(f"  System prompt:    {ENTITY_TRACKING_PROMPT[:60]}...")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
 logger.info(f"  Batch size:       {training_args.per_device_train_batch_size}")
 logger.info(f"  Grad accum steps: {training_args.gradient_accumulation_steps}")
 logger.info(f"  Learning rate:    {training_args.learning_rate}")
 logger.info(f"  Temperature:      {training_args.temperature}")
+logger.info(f"  Max prompt len:   {training_args.max_prompt_length}")
+logger.info(f"  Max compl len:    {training_args.max_completion_length}")
 logger.info(f"  Output dir:       {training_args.output_dir}")
 logger.info(f"  W&B:              {training_args.report_to}")
 
 
 # ── Trainer ─────────────────────────────────────────────────────────────────
-# Five thematic reward functions (from gap analysis):
-#   correctness_reward:    0.0 or 1.0  — final answer match (dominant signal)
-#   reasoning_reward:      0.0 - 0.5   — intermediate step verification
-#   format_reward:         0.0 - 0.2   — structured step-by-step reasoning
-#   hallucination_penalty: -0.3 - 0.0  — penalize ungrounded numbers
-#   repetition_penalty:    -0.2 - 0.0  — penalize reasoning loops
-# Total range: -0.5 to 1.7, correctness always dominates.
 trainer = GRPOTrainer(
-    model=MODEL_NAME,
+    model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[
-        correctness_reward,
-        reasoning_reward,
-        format_reward,
-        hallucination_penalty,
-        repetition_penalty,
-    ],
+    reward_funcs=[correctness_reward, entity_tracking_reward],
     peft_config=peft_config,
 )
 

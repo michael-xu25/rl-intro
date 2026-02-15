@@ -4,22 +4,23 @@ Tiny-Math-Solver — GRPO on GSM8K with TRL.
 Trains Qwen2.5-1.5B-Instruct on a curated subset of GSM8K problems
 requiring 3+ entity tracking, using <think> tags for structured reasoning.
 
-Reward functions:
-  - correctness_reward (0/1): final answer matches gold
-  - intermediate_step_reward (0-0.5): partial credit for correct intermediate
-    computation values from gold <<expr=result>> annotations.
+Reward: binary correctness only (1.0 if final answer matches gold, 0.0
+otherwise). No auxiliary rewards -- GRPO learns entirely from the contrast
+between correct and incorrect completions within each group.
 
-    This reward VARIES across completions (unlike the old entity_tracking_reward
-    where all completions got identical scores), giving GRPO real gradients.
+Ghost-batching mitigation:
+  The entity-filtered dataset contains many problems that are too easy (all 8
+  completions correct → zero gradient) or too hard (all wrong → zero gradient).
+  Only ~33% of problems produce useful signal. To compensate:
+  - Large effective batch (128 prompts via gradient_accumulation_steps=32)
+    ensures each update sees ~40+ "sweet spot" problems
+  - KL penalty (beta) prevents policy drift from noisy updates
+  - DAPO loss normalizes across active tokens in the global batch
 
 Usage:
-    # First, build the curated dataset:
-    python src/build_entity_dataset.py
-
-    # Then train:
-    python src/train_grpo.py
-    # or with accelerate for multi-GPU:
-    accelerate launch src/train_grpo.py
+    python src/build_entity_dataset.py   # build curated dataset (once)
+    python src/train_grpo.py             # train
+    accelerate launch src/train_grpo.py  # multi-GPU
 """
 
 import os
@@ -49,7 +50,7 @@ logger.setLevel(logging.INFO)
 from datasets import load_from_disk
 from peft import LoraConfig
 from trl import GRPOTrainer, GRPOConfig
-from reward_func import correctness_reward, intermediate_step_reward
+from reward_func import correctness_reward
 
 logger.info(f"=== Run started: {RUN_TIMESTAMP} ===")
 logger.info(f"Log file: {LOG_FILE}")
@@ -58,8 +59,7 @@ logger.info(f"Log file: {LOG_FILE}")
 # ── Dataset ─────────────────────────────────────────────────────────────────
 # Curated dataset (built by src/build_entity_dataset.py).
 # Contains GSM8K problems with 3+ named entities (the model's weak spot).
-# The 'answer' column has gold solutions with <<expr=result>> annotations
-# used by intermediate_step_reward. TRL expects a 'prompt' column.
+# TRL expects a 'prompt' column.
 
 ENTITY_TRACKING_PROMPT = (
     "Think step by step inside <think> tags before answering. "
@@ -102,31 +102,58 @@ training_args = GRPOConfig(
     output_dir=f"./checkpoint/run_{RUN_TIMESTAMP}",
     run_name=f"grpo_{RUN_TIMESTAMP}",
 
-    # GRPO sampling — entity-tracking config:
-    # - Dataset filtered to 3+ entity problems (model's weak spot)
-    # - <think> tags create structurally diverse reasoning paths
-    # - temp=1.0 for maximum diversity across 8 generations
-    # - 1024 completion length gives room for <think> section + answer
+    # GRPO sampling
+    # - 8 completions per prompt at temp=1.0 for diverse reasoning paths
+    # - 1024 completion length for <think> section + answer
     # - 300 prompt length accommodates system prompt (~40 tokens)
     num_generations=8,
     max_completion_length=1024,
     max_prompt_length=300,
     temperature=1.0,
 
-    # Training — H200/A100 config
-    num_train_epochs=1,
+    # ── Ghost-batching mitigation ──────────────────────────────────────
+    # With entity-only filtering (~33% of problems in sweet spot), most
+    # mini-batches contain zero-gradient prompts (all-correct or all-wrong).
+    # A small effective batch means some updates see NO useful signal at all,
+    # causing massive W&B noise.
+    #
+    # Fix: accumulate over 32 mini-batches so each optimizer step sees
+    # ~128 prompts. Even if only 33% produce gradient, that's ~40 useful
+    # prompts per update -- enough for a stable direction.
     per_device_train_batch_size=4,
-    gradient_accumulation_steps=4,  # effective batch = 16 prompts
-    max_steps=200,                  # ~1hr on H200, extend later
-    learning_rate=1e-4,             # moderate LR for LoRA
+    gradient_accumulation_steps=32,  # effective batch = 4*32 = 128 prompts
+    #                                  128 / 8 generations = 16 unique prompts
+    #                                  per accumulation step, 16*32=512 total
+    #                                  sequences before each weight update
+
+    # Training schedule
+    num_train_epochs=1,
+    max_steps=500,                   # ~5 epochs over ~1500 entity problems
+    learning_rate=5e-5,              # halved from 1e-4 for stability
     lr_scheduler_type="cosine",
     warmup_ratio=0.03,
     bf16=True,
     gradient_checkpointing=True,
 
+    # ── Stability: KL penalty ──────────────────────────────────────────
+    # Prevents policy drift from noisy updates. Without this, a few
+    # outlier batches (all sweet-spot problems with extreme advantages)
+    # can push the model too far from the base policy.
+    # DeepSeek-R1 uses 0.001; we use 0.04 because our effective signal
+    # is noisier (ghost batching) so we need a stronger anchor.
+    beta=0.04,
+
+    # ── DAPO loss + truncation masking ─────────────────────────────────
+    # loss_type="dapo" (default): normalizes by active tokens in global
+    # batch, eliminating length bias.
+    # mask_truncated_completions: excludes cut-off completions from loss
+    # so they don't get incorrectly penalized (DAPO paper recommendation).
+    mask_truncated_completions=True,
+
     # Logging & saving
     logging_steps=1,
     save_steps=50,
+    log_completions=True,            # log (prompt, completion) pairs to W&B
     report_to="wandb" if os.environ.get("WANDB_TOKEN") else "none",
 
     # Misc
@@ -135,18 +162,26 @@ training_args = GRPOConfig(
 
 
 # ── Log config ──────────────────────────────────────────────────────────────
+eff_batch = (training_args.per_device_train_batch_size
+             * training_args.gradient_accumulation_steps)
+unique_prompts_per_step = eff_batch // training_args.num_generations
+
 logger.info("Config:")
 logger.info(f"  Model:            Qwen/Qwen2.5-1.5B-Instruct")
-logger.info(f"  Mode:             GRPO (correctness + intermediate steps)")
+logger.info(f"  Mode:             GRPO (correctness-only reward)")
 logger.info(f"  System prompt:    {ENTITY_TRACKING_PROMPT[:60]}...")
 logger.info(f"  LoRA rank:        {peft_config.r}")
 logger.info(f"  Num generations:  {training_args.num_generations}")
 logger.info(f"  Batch size:       {training_args.per_device_train_batch_size}")
 logger.info(f"  Grad accum steps: {training_args.gradient_accumulation_steps}")
+logger.info(f"  Effective batch:  {eff_batch} sequences = {unique_prompts_per_step} unique prompts")
 logger.info(f"  Learning rate:    {training_args.learning_rate}")
+logger.info(f"  Beta (KL pen.):   {training_args.beta}")
 logger.info(f"  Temperature:      {training_args.temperature}")
 logger.info(f"  Max prompt len:   {training_args.max_prompt_length}")
 logger.info(f"  Max compl len:    {training_args.max_completion_length}")
+logger.info(f"  Max steps:        {training_args.max_steps}")
+logger.info(f"  Mask truncated:   {training_args.mask_truncated_completions}")
 logger.info(f"  Output dir:       {training_args.output_dir}")
 logger.info(f"  W&B:              {training_args.report_to}")
 
@@ -156,7 +191,7 @@ trainer = GRPOTrainer(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     args=training_args,
     train_dataset=dataset,
-    reward_funcs=[correctness_reward, intermediate_step_reward],
+    reward_funcs=[correctness_reward],
     peft_config=peft_config,
 )
 

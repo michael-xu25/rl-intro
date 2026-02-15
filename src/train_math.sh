@@ -22,7 +22,9 @@ echo ">>> Launching GRPO training ..."
 echo "    Model:   Qwen/Qwen2.5-1.5B-Instruct"
 echo "    Dataset: GSM8K (filtered to 3+ entity problems)"
 echo "    Method:  GRPO + LoRA (rank 16) + <think> tags"
-echo "    Rewards: correctness (0/1) + intermediate step accuracy (0-0.5)"
+echo "    Reward:  correctness only (0/1)"
+echo "    Batch:   128 effective (ghost-batch mitigation)"
+echo "    KL beta: 0.04"
 echo ""
 
 python src/train_grpo.py

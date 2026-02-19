@@ -236,11 +236,13 @@ def main():
                 }
                 all_results.append(record)
                 f.write(json.dumps(record) + "\n")
+                f.flush()
 
                 emoji = "✓" if is_correct else "✗"
                 pred_str = pred if pred else "—"
                 print(f"[{prob_i+1:3d}/{N_PROBLEMS}] {emoji}  "
-                      f"gold={gold}  pred={pred_str}  via={method}  ({gen_time:.1f}s)")
+                      f"gold={gold}  pred={pred_str}  via={method}  ({gen_time:.1f}s)",
+                      flush=True)
 
             else:
                 outputs = model.generate(
@@ -276,11 +278,13 @@ def main():
                 }
                 all_results.append(record)
                 f.write(json.dumps(record) + "\n")
+                f.flush()
 
                 bar = "█" * n_correct + "░" * (K - n_correct)
                 emoji = "✓" if n_correct > 0 else "✗"
                 print(f"[{prob_i+1:3d}/{N_PROBLEMS}] {emoji} {n_correct:2d}/{K} correct  "
-                      f"|{bar}|  gold={gold}  ({gen_time:.1f}s)")
+                      f"|{bar}|  gold={gold}  ({gen_time:.1f}s)",
+                      flush=True)
 
     # Summary
     if greedy:

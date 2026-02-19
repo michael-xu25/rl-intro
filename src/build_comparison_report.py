@@ -132,25 +132,22 @@ def key_by_idx(records: list[dict]) -> dict[int, dict]:
     return {r["idx"]: r for r in records}
 
 
-def safe_float(s):
-    try:
-        return float(str(s).replace(",", ""))
-    except (ValueError, TypeError):
-        return None
-
-
-def answer_distance(pred, gold):
-    p, g = safe_float(pred), safe_float(gold)
-    if p is None or g is None:
-        return None
-    return abs(p - g)
-
 
 def escape_for_mathjax(text: str) -> str:
-    """HTML-escape text while preserving LaTeX for MathJax rendering."""
-    t = html.escape(text)
-    t = t.replace("\n", "<br>")
-    return t
+    """HTML-escape text while preserving LaTeX for MathJax rendering.
+
+    Splits on LaTeX display-math delimiters so <br> tags are never
+    injected inside \\[ ... \\] blocks (which would break MathJax).
+    """
+    parts = re.split(r'(\\\[.*?\\\])', text, flags=re.DOTALL)
+    out = []
+    for part in parts:
+        escaped = html.escape(part)
+        if part.startswith("\\[") and part.endswith("\\]"):
+            out.append(escaped)
+        else:
+            out.append(escaped.replace("\n", "<br>"))
+    return "".join(out)
 
 
 # ── Analysis computation ─────────────────────────────────────────────────
@@ -199,6 +196,30 @@ def compute_analysis(rows):
         and r["c_correct"]
     )
 
+    # Extraction artifact check: "fixed" problems where the baseline used a
+    # fallback extraction method AND the gold answer appeared in the baseline
+    # response text — meaning the model may have had the right answer but the
+    # extractor grabbed the wrong number.
+    fixed = [r for r in rows if r["category"] == "fixed"]
+    extraction_artifacts = []
+    for r in fixed:
+        if r["b_method"] == "boxed":
+            continue
+        gold = str(r["gold_answer"])
+        if gold and re.search(r'(?<!\d)' + re.escape(gold) + r'(?!\d)', r["b_response"]):
+            extraction_artifacts.append(r["idx"])
+    a["extraction_artifacts"] = extraction_artifacts
+    a["n_fixed"] = len(fixed)
+
+    # Wrong-answer \boxed{} rate: did the model learn to always emit \boxed{}
+    # even when wrong? This is the real reward hacking vector.
+    b_wrong = [r for r in rows if not r["b_correct"]]
+    c_wrong = [r for r in rows if not r["c_correct"]]
+    a["b_wrong_boxed"] = sum(1 for r in b_wrong if r["b_method"] == "boxed")
+    a["b_wrong_total"] = len(b_wrong)
+    a["c_wrong_boxed"] = sum(1 for r in c_wrong if r["c_method"] == "boxed")
+    a["c_wrong_total"] = len(c_wrong)
+
     # Token stats
     b_tokens = [r["b_tokens"] for r in rows]
     c_tokens = [r["c_tokens"] for r in rows]
@@ -232,18 +253,6 @@ def compute_analysis(rows):
     still_wrong = [r for r in rows if r["category"] == "still_wrong"]
     a["sw_same_answer"] = sum(1 for r in still_wrong if str(r["b_pred"]) == str(r["c_pred"]))
     a["sw_diff_answer"] = len(still_wrong) - a["sw_same_answer"]
-    closer = 0
-    farther = 0
-    for r in still_wrong:
-        bd = answer_distance(r["b_pred"], r["gold_answer"])
-        cd = answer_distance(r["c_pred"], r["gold_answer"])
-        if bd is not None and cd is not None:
-            if cd < bd:
-                closer += 1
-            elif cd > bd:
-                farther += 1
-    a["sw_closer"] = closer
-    a["sw_farther"] = farther
 
     return a
 
@@ -472,8 +481,23 @@ MathJax = {
     parts.append(f"""
 <h1>Baseline vs Checkpoint: Greedy Comparison</h1>
 <p class="subtitle">
-  Both evaluated with greedy decoding (temp=0, single response) on 100 GSM8K test problems, no system prompt.
+  Both evaluated with greedy decoding (temp=0, single response) on {len(rows)} GSM8K <b>test</b> problems (seed=42), no system prompt.
 </p>
+<details style="margin-bottom:16px;">
+  <summary style="color:#94a3b8;cursor:pointer;font-size:0.85em;">Provenance &amp; Reproducibility</summary>
+  <div style="background:#1e293b;border-radius:8px;padding:12px 16px;margin-top:6px;font-size:0.82em;color:#94a3b8;line-height:1.8;">
+    <b>Base model:</b> Qwen/Qwen2.5-1.5B-Instruct<br>
+    <b>Checkpoint:</b> LoRA adapter, GRPO step 325 (run_20260215_202141/checkpoint-50)<br>
+    <b>Training data:</b> GSM8K train split, filtered to 3+ named entities (~240 problems)<br>
+    <b>Eval data:</b> GSM8K test split, 100 random problems (seed=42) &mdash; no overlap with training<br>
+    <b>Baseline script:</b> <code>src/eval_baseline.py</code> (greedy, no system prompt, no LoRA)<br>
+    <b>Checkpoint script:</b> <code>src/eval_checkpoint.py --greedy --no-system-prompt</code><br>
+    <b>Reward design:</b> correctness (1.0) + format bonus (0.1 for \\boxed{{}})<br>
+    <b>Training config:</b> GRPO, LoRA rank 16, lr=5e-5, beta=0.04, grad_accum=16, 500 max steps<br>
+    <b>Note:</b> Checkpoint was trained WITH a system prompt ("Think step by step...") but evaluated WITHOUT it.
+    The improvement held without the prompt, suggesting the model internalized the reasoning behavior.
+  </div>
+</details>
 
 <div class="summary-grid">
   <div class="stat-card">
@@ -526,6 +550,11 @@ MathJax = {
     a = analysis
     sw_total = cat_counts.get("still_wrong", 0)
 
+    # Pre-compute wrong-boxed rates for display
+    b_wrong_boxed_pct = (a['b_wrong_boxed'] / a['b_wrong_total'] * 100) if a['b_wrong_total'] else 0
+    c_wrong_boxed_pct = (a['c_wrong_boxed'] / a['c_wrong_total'] * 100) if a['c_wrong_total'] else 0
+    n_artifacts = len(a['extraction_artifacts'])
+
     parts.append(f"""
 <div class="analysis-section">
   <h2>Reward Hacking Analysis</h2>
@@ -536,12 +565,19 @@ MathJax = {
   <div class="analysis-grid">
     <div>
       <table class="analysis-table">
-        <tr><th colspan="3">\\boxed{{}} Usage</th></tr>
+        <tr><th colspan="3">\\boxed{{}} Usage (All Answers)</th></tr>
         <tr><td>Baseline uses \\boxed{{}}</td><td class="num">{a['b_boxed']}</td><td class="num">/ {len(rows)}</td></tr>
         <tr><td>Checkpoint uses \\boxed{{}}</td><td class="num">{a['c_boxed']}</td><td class="num">/ {len(rows)}</td></tr>
+        <tr><th colspan="3" style="padding-top:10px">\\boxed{{}} on Wrong Answers (reward hack vector)</th></tr>
+        <tr><td>Baseline wrong answers using \\boxed{{}}</td>
+            <td class="num">{a['b_wrong_boxed']}/{a['b_wrong_total']}</td>
+            <td class="num">{b_wrong_boxed_pct:.0f}%</td></tr>
+        <tr><td>Checkpoint wrong answers using \\boxed{{}}</td>
+            <td class="num {'bad' if c_wrong_boxed_pct > b_wrong_boxed_pct + 20 else 'neutral'}">{a['c_wrong_boxed']}/{a['c_wrong_total']}</td>
+            <td class="num {'bad' if c_wrong_boxed_pct > b_wrong_boxed_pct + 20 else 'neutral'}">{c_wrong_boxed_pct:.0f}%</td></tr>
         <tr><td>Gained \\boxed{{}} but still wrong</td>
             <td class="num {'bad' if a['format_only_wins'] > 3 else 'neutral'}">{a['format_only_wins']}</td>
-            <td class="num" style="color:#64748b">reward hack signal</td></tr>
+            <td></td></tr>
         <tr><td>Gained \\boxed{{}} and now correct</td>
             <td class="num good">{a['format_and_correct']}</td>
             <td></td></tr>
@@ -559,7 +595,15 @@ MathJax = {
         <tr><td>Delta (avg)</td>
             <td class="num {('good' if a['c_token_avg'] < a['b_token_avg'] else 'neutral')}">{a['c_token_avg'] - a['b_token_avg']:+.0f}</td>
             <td></td></tr>
+        <tr><th colspan="3" style="padding-top:10px">Extraction Artifact Check</th></tr>
+        <tr><td>"Fixed" problems where gold answer<br>was already in baseline text</td>
+            <td class="num {'bad' if n_artifacts > 0 else 'good'}">{n_artifacts}</td>
+            <td class="num">/ {a['n_fixed']}</td></tr>
       </table>
+      <p style="color:#64748b;font-size:0.78em;margin-top:6px;">
+        If high, some "fixes" may be the extractor catching answers that were always there
+        but not in \\boxed{{}}.
+      </p>
     </div>
   </div>
 
@@ -573,8 +617,10 @@ MathJax = {
         if eb["n"] == 0:
             continue
         d = eb["c_acc"] - eb["b_acc"]
-        dc = "good" if d > 0.02 else "bad" if d < -0.02 else "neutral"
-        parts.append(f'        <tr><td>{bucket} entities</td>'
+        small_n = eb["n"] < 15
+        dc = "neutral" if small_n else ("good" if d > 0.02 else "bad" if d < -0.02 else "neutral")
+        caveat = ' <span style="color:#64748b" title="Too few samples for reliable comparison">*</span>' if small_n else ""
+        parts.append(f'        <tr><td>{bucket} entities{caveat}</td>'
                       f'<td class="num">{eb["n"]}</td>'
                       f'<td class="num">{eb["b_acc"]*100:.0f}%</td>'
                       f'<td class="num">{eb["c_acc"]*100:.0f}%</td>'
@@ -582,14 +628,15 @@ MathJax = {
 
     parts.append(f"""
       </table>
+      <p style="color:#64748b;font-size:0.78em;margin-top:6px;">
+        * Buckets with fewer than 15 problems &mdash; treat deltas as noise, not signal.
+      </p>
     </div>
     <div>
       <table class="analysis-table">
         <tr><th colspan="2">"Still Wrong" Breakdown ({sw_total} problems)</th></tr>
         <tr><td>Same wrong answer</td><td class="num">{a['sw_same_answer']}</td></tr>
         <tr><td>Different wrong answer</td><td class="num">{a['sw_diff_answer']}</td></tr>
-        <tr><td>Checkpoint answer closer to gold</td><td class="num good">{a['sw_closer']}</td></tr>
-        <tr><td>Checkpoint answer farther from gold</td><td class="num bad">{a['sw_farther']}</td></tr>
       </table>
     </div>
   </div>
@@ -597,21 +644,28 @@ MathJax = {
   <div class="verdict-box">
 """)
 
-    # Verdict logic
+    # Verdict logic — proportional to magnitude of change
     hack_score = a["format_only_wins"]
-    real_gain = cat_counts.get("fixed", 0) - cat_counts.get("broken", 0)
-    if hack_score <= 2 and real_gain > 0:
+    n_fixed = cat_counts.get("fixed", 0)
+    n_broken = cat_counts.get("broken", 0)
+    real_gain = n_fixed - n_broken
+    hack_fraction = hack_score / max(n_fixed, 1)
+    wrong_boxed_jump = c_wrong_boxed_pct - b_wrong_boxed_pct
+
+    if real_gain > 0 and hack_fraction < 0.3 and wrong_boxed_jump < 30:
         parts.append(f'<span class="good"><b>Verdict: Likely real improvement.</b></span> '
-                      f'Net {real_gain} problems fixed, only {hack_score} format-only gains. '
-                      f'The model learned better math reasoning, not just formatting.')
-    elif hack_score > 5 and real_gain <= 2:
+                      f'Net {real_gain} problems fixed ({n_fixed} fixed, {n_broken} broken). '
+                      f'{hack_score} format-only gains ({hack_fraction*100:.0f}% of fixes). '
+                      f'Wrong-answer \\boxed{{}} rate: {b_wrong_boxed_pct:.0f}% &rarr; {c_wrong_boxed_pct:.0f}%.')
+    elif hack_fraction >= 0.5 or (real_gain <= 0 and hack_score > 0):
         parts.append(f'<span class="bad"><b>Verdict: Likely reward hacking.</b></span> '
-                      f'{hack_score} problems gained \\boxed{{}} without correctness. '
-                      f'Only net {real_gain} problems actually fixed.')
+                      f'{hack_score} format-only gains ({hack_fraction*100:.0f}% of fixes). '
+                      f'Net accuracy change: {real_gain:+d}. '
+                      f'Wrong-answer \\boxed{{}} rate: {b_wrong_boxed_pct:.0f}% &rarr; {c_wrong_boxed_pct:.0f}%.')
     else:
         parts.append(f'<span class="neutral"><b>Verdict: Mixed signal.</b></span> '
-                      f'Net {real_gain} fixed, {hack_score} format-only gains. '
-                      f'Some real improvement alongside formatting changes.')
+                      f'Net {real_gain} fixed, {hack_score} format-only gains ({hack_fraction*100:.0f}% of fixes). '
+                      f'Wrong-answer \\boxed{{}} rate: {b_wrong_boxed_pct:.0f}% &rarr; {c_wrong_boxed_pct:.0f}%.')
 
     parts.append("""
   </div>
@@ -694,18 +748,8 @@ MathJax = {
             if b_pred_s == c_pred_s:
                 ann = f"Same wrong answer: <b>{html.escape(b_pred_s)}</b> (gold: {html.escape(r['gold_answer'])})"
             else:
-                bd = answer_distance(r["b_pred"], r["gold_answer"])
-                cd = answer_distance(r["c_pred"], r["gold_answer"])
-                direction = ""
-                if bd is not None and cd is not None:
-                    if cd < bd:
-                        direction = ' <span class="good">(closer to gold)</span>'
-                    elif cd > bd:
-                        direction = ' <span class="bad">(farther from gold)</span>'
-                    else:
-                        direction = ' <span class="neutral">(same distance)</span>'
                 ann = (f"Answer changed: <b>{html.escape(b_pred_s)}</b> &rarr; "
-                       f"<b>{html.escape(c_pred_s)}</b> (gold: {html.escape(r['gold_answer'])}){direction}")
+                       f"<b>{html.escape(c_pred_s)}</b> (gold: {html.escape(r['gold_answer'])})")
 
             method_change = ""
             if r["b_method"] != r["c_method"]:
@@ -716,11 +760,16 @@ MathJax = {
 
         elif r["category"] == "fixed":
             b_pred_s = str(r["b_pred"]) if r["b_pred"] else "none"
+            is_artifact = r["idx"] in a["extraction_artifacts"]
+            artifact_note = (' <span class="bad" title="The correct answer appeared in the baseline '
+                             'response but was not extracted — this may be a formatting improvement, '
+                             'not a reasoning one.">&#9888; extraction artifact?</span>') if is_artifact else ""
             annotation_html = (
                 f'<div class="annotation">'
                 f'<span class="good">Now correct.</span> '
-                f'Baseline predicted <b>{html.escape(b_pred_s)}</b>, '
-                f'checkpoint gets <b>{html.escape(r["gold_answer"])}</b>.'
+                f'Baseline predicted <b>{html.escape(b_pred_s)}</b> (via <code>{r["b_method"]}</code>), '
+                f'checkpoint gets <b>{html.escape(r["gold_answer"])}</b> (via <code>{r["c_method"]}</code>).'
+                f'{artifact_note}'
                 f'</div>'
             )
 

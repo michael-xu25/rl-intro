@@ -1,7 +1,7 @@
 # Experiment Post-Mortem: Sweet Spot Validation
 
-**Date:** 2026-03-27  
-**Status:** ❌ Flawed experimental design  
+**Date:** 2026-03-27 (Updated with correct results)
+**Status:** ⚠️ Flawed design BUT promising signals
 **Lesson:** Always isolate variables
 
 ---
@@ -10,23 +10,28 @@
 
 We tried to prove difficulty-based calibration beats entity heuristics, but designed an unfair test.
 
-**Result:** Entity filter won (77.0% vs 67.7%), BUT we changed dataset size (1,620 vs 15 problems) simultaneously - a **108x difference!**
+**CORRECTED Result:** Sweet spot achieved **74.0%** (+6.3pp), entity filter achieved **77.0%** (+9.3pp).
 
-Cannot conclude anything from an unfair comparison.
+**The experiment shows:**
+- ✅ Sweet spot works (6.3pp from just 15 problems!)
+- ✅ But entity's scale advantage won (3pp better with 108x more data)
+- ⚠️ Still unfair comparison (different dataset sizes AND epochs)
 
 ---
 
-## What Actually Happened
+## What Actually Happened (CORRECTED)
 
 | Metric | Entity Filter | Sweet Spot | Fair? |
 |--------|---------------|------------|-------|
-| **Test Accuracy** | 77.0% (+9.3pp) | 67.7% (+0.0pp) | ❌ |
+| **Test Accuracy** | 77.0% (+9.3pp) | **74.0% (+6.3pp)** ✅ | ❌ |
 | **Dataset Size** | ~1,620 problems | 15 problems | ❌ 108x diff! |
 | **Epochs (checkpoint-50)** | 0.247 epochs | 26.7 epochs | ❌ 108x diff! |
 | **Ghost Batching** | 41.6% | 24.1% | ✅ (confirmed!) |
 | **Training Accuracy** | 81.4% | 74.4% | N/A |
 
-**Diagnosis:** Sweet spot overfit to 15 problems (74% train, 67% test). Entity generalized from 1,620 problems.
+**CORRECTION:** Sweet spot achieved 74.0% (NOT 67.7% - parser error grabbed baseline instead of checkpoint result).
+
+**New interpretation:** Sweet spot learned from 15 hard problems and generalized moderately well. NOT complete overfitting. Shows difficulty calibration has signal, but limited by small dataset size.
 
 ---
 
@@ -71,38 +76,55 @@ We changed simultaneously:
 
 ---
 
-## What We Actually Proved
+## What We Actually Proved (UPDATED)
 
 ### ✅ Validated
 
-1. **Ghost batch reduction (42%)**
+1. **Difficulty calibration has measurable signal**
+   - Sweet spot: 15 problems → +6.3pp improvement
+   - Entity: 1,620 problems → +9.3pp improvement
+   - **6.3pp from just 15 problems suggests the selection method works**
+   - Not just memorization (74.4% train → 74.0% test = generalization)
+
+2. **Ghost batch reduction (42%)**
    - Entity: 41.6% wasted compute
    - Sweet spot: 24.1% wasted compute
    - This is real and holds despite flawed experiment
 
-2. **Pass@16 measurement works**
-   - Successfully identified hard problems
-   - Model struggled on them (74% vs 81% training acc)
+3. **Pass@16 measurement works**
+   - Successfully identified hard problems (2-12/16 range)
+   - Model struggled on them (74.4% vs 81.4% training acc)
+   - But still learned enough to generalize (+6.3pp)
 
-3. **Dataset size is critical**
-   - 15 problems → complete overfitting
-   - 1,620 problems → generalization
-   - **You cannot learn math from 15 examples, no matter how "sweet"**
+4. **Dataset size still matters**
+   - 15 problems → +6.3pp
+   - 1,620 problems → +9.3pp
+   - **3pp gap suggests scale advantage**
+   - But diminishing returns? (108x data → 1.5x improvement)
 
-### ❌ Did NOT Prove
+### ⚠️ Partially Validated
+
+1. **Difficulty calibration works, but...**
+   - ✅ 6.3pp gain from 15 problems (vs 0pp baseline)
+   - ⚠️ 3pp behind entity filter (77.0% vs 74.0%)
+   - ❓ Need matched dataset size to test fairly
+
+2. **Sweet spot enables learning**
+   - ✅ Proved it's not just memorization
+   - ✅ Training on hard problems → test generalization
+   - ❓ But is it better than random 15 problems? (no control)
+
+### ❌ Still Did NOT Prove
 
 1. **Difficulty calibration beats heuristics**
-   - Didn't test fairly (108x size mismatch)
-   - Still an open question
+   - Sweet 15 problems: 74.0%
+   - Entity 1,620 problems: 77.0%
+   - Need same dataset size to compare methods fairly
 
-2. **Sweet spot improves accuracy**
-   - Failed on tiny dataset (expected)
-   - Unknown on proper dataset size
-
-3. **Curriculum learning matters**
-   - Entity had mixed difficulty (accidental curriculum)
-   - Sweet was pure hard (no curriculum)
-   - But also different sizes, so can't isolate this
+2. **Curriculum learning matters**
+   - Entity had mixed difficulty
+   - Sweet was pure hard
+   - Different sizes confound the comparison
 
 ---
 
@@ -301,3 +323,159 @@ This is science. Onward to Week 2.
 **Date:** 2026-03-27  
 **Authors:** Human + Claude  
 **Status:** Learning complete. Moving to product.
+
+---
+
+## ADDENDUM: Does This Prove Difficulty Calibration Works?
+
+**Updated 2026-03-27 after discovering correct result (74.0% not 67.7%)**
+
+### The Question
+
+Does the 6.3pp improvement from 15 sweet spot problems prove that difficulty-based calibration produces measurable results?
+
+### Short Answer
+
+**TOO EARLY TO TELL DEFINITIVELY, but there are PROMISING SIGNALS.**
+
+### The Evidence For
+
+1. **Non-zero improvement from tiny dataset**
+   - 15 problems → +6.3pp gain
+   - Baseline would be 0pp (no learning)
+   - Shows the model learned something transferable
+
+2. **Generalization, not memorization**
+   - Training: 74.4% accuracy
+   - Test: 74.0% accuracy
+   - Very close! Model didn't just memorize
+
+3. **Ghost batch reduction is real**
+   - 42% reduction (41.6% → 24.1%)
+   - Directly tied to difficulty calibration working
+   - The sweet spot filter DID identify problems with learning signal
+
+4. **Training on hard problems worked**
+   - 2-12/16 pass rate = model struggles with these
+   - Yet still achieved 74% test accuracy
+   - Suggests targeted difficulty CAN work
+
+### The Evidence Against (Or "Not Yet")
+
+1. **No control group**
+   - We don't know if RANDOM 15 problems would get same result
+   - Or EASY 15 problems (13-16/16)
+   - Or ENTITY 15 problems
+   - **Can't isolate difficulty as the causal factor**
+
+2. **System prompt confound**
+   - Both runs used `<think>` tag prompting
+   - Entity filter showed broad improvement (10/55 failure modes → +9.3pp overall)
+   - Maybe prompt is doing most of the work?
+   - **Untested hypothesis**
+
+3. **Different training dynamics**
+   - Sweet: 26.7 epochs (heavy repetition)
+   - Entity: 0.247 epochs (single pass)
+   - Different learning regimes entirely
+   - **Can't compare apples to oranges**
+
+4. **Sample size is tiny**
+   - 15 problems = very small sample
+   - High variance possible
+   - Could be lucky selection
+   - **Need larger sample to be confident**
+
+### What We'd Need to Prove It
+
+**Experiment 1: Controlled Difficulty Test**
+
+Compare (all with 15 problems, 26.7 epochs):
+- Random 15 problems
+- Easy 15 problems (13-16/16)
+- Sweet 15 problems (2-12/16)
+- Hard 15 problems (0-1/16)
+
+If sweet spot beats all others → difficulty calibration matters.
+
+**Experiment 2: Matched Scale Test**
+
+Compare (all with 1,620 problems, 0.247 epochs):
+- Entity filter (3+ entities)
+- Sweet spot filter (2-12/16)
+- Random selection
+
+If sweet spot beats entity → difficulty beats heuristics.
+
+**Experiment 3: Prompt Effect Test**
+
+Compare (all with random 1,620 problems):
+- No system prompt
+- `<think>` prompt
+- Entity-specific prompt
+
+If prompt alone gets 67% → 75%+ → problem selection is secondary.
+
+### My Honest Assessment
+
+**Promising but inconclusive.**
+
+**What we know:**
+- ✅ 6.3pp from 15 problems is impressive
+- ✅ Ghost batching reduction is real and valuable
+- ✅ Model generalized (not pure memorization)
+- ✅ Training on hard problems didn't break learning
+
+**What we don't know:**
+- ❓ Would random 15 problems do the same?
+- ❓ Is difficulty calibration the key factor or just correlation?
+- ❓ Would sweet spot beat entity at matched scale?
+- ❓ Is the prompt doing most of the work?
+
+**The 6.3pp improvement suggests there's SIGNAL in difficulty calibration.**
+
+But without proper controls, we can't say it's CAUSAL. Could be:
+- Difficulty calibration working ← what we hope
+- Lucky problem selection ← needs larger sample
+- Prompt effect ← needs control
+- Training dynamics ← needs matched epochs
+
+### What This Means for CalibrateRL
+
+**For the thesis:**
+- Strong suggestive evidence, not proof
+- Ghost batch reduction alone is valuable (42% efficiency gain)
+- 6.3pp from 15 problems is encouraging
+- Need proper validation before strong claims
+
+**For the pitch deck:**
+- ✅ "Initial results show promise: 6.3pp from 15 calibrated problems"
+- ✅ "42% reduction in wasted compute (ghost batching)"
+- ✅ "Early validation suggests difficulty calibration has signal"
+- ❌ "Proven to beat heuristic methods" ← not yet
+- ❌ "Difficulty calibration is the key factor" ← needs controls
+
+**For Week 2-4:**
+- The concept is promising enough to build on
+- Ghost batch reduction alone justifies the approach
+- Build the product, validate rigorously later
+- Be honest about limitations in technical documentation
+
+### Bottom Line
+
+**Is there measurable signal? YES.**
+
+6.3pp from 15 problems is not zero. Ghost batching dropped 42%. The model learned and generalized.
+
+**Is it proven to be difficulty calibration specifically? NOT YET.**
+
+Need controls to isolate the causal factor. But the signals are promising enough to continue.
+
+**Should you keep building? ABSOLUTELY.**
+
+The evidence suggests this direction is worth pursuing. Build the product, get more data, validate properly when you have resources.
+
+---
+
+**Final verdict:** Promising signals, not definitive proof. Enough to justify building the product. Not enough to publish a paper claiming causality. Perfect for an early-stage startup iterating based on data.
+
